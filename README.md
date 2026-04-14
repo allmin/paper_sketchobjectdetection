@@ -14,19 +14,24 @@ The focus is on detecting **icon‑like objects**, with potential extension to t
 - Synthetic generation is used to enable controlled experiments
 
 Generation parameters include:
-- Number of icons
+- Number of types of icons
+- Number of icons per type
 - Amount of overlap
-- Repetition of icons  
+- Maximum scale-up factor of icons
 
 These settings aim to mimic **rich pictures**.
 
+Code:
+- Run 01_datasynthesis.py. Set the appropriate parameters in the main function.
+
 ---
 
-## Approaches
+## Icon Detection Approaches
 
 The following categories of detection methods are studied:
 
 - Bottom‑up approaches  
+
 - Middle‑level approaches  
 - Top‑down approaches  
 

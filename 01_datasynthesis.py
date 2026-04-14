@@ -1,5 +1,6 @@
 from ast import main
 
+import cv2
 import kagglehub
 import os
 import random
@@ -8,6 +9,7 @@ import matplotlib.pyplot as plt
 import matplotlib.image as mpimg
 import json
 from torch import classes
+from itertools import product
 
 # setting random seed for reproducibility
 random.seed(42)
@@ -69,48 +71,47 @@ class dataset:
             ]
         print("Dataset dictionary created with class names and image file paths.")
         self.dataset = dataset
-
         # Summary of classnames and number of images in each class
         for class_name, image_paths in self.dataset.items():
             print(f"Class: {class_name}, Number of images: {len(image_paths)}")
 
         print("Dataset is ready for use.")
 
-    def calculate_overlap_percentage(self, icon_bounding_box, rand_bbox_list):
+    def calculate_overlap_percentage(self, icon_bounding_box, existing_bbox_list):
         overlap_percentage = 0
-        icon_size = (
-            icon_bounding_box[2] - icon_bounding_box[0],
-            icon_bounding_box[3] - icon_bounding_box[1],
-        )
-        for existing_bbox in rand_bbox_list:
+        max_overlap = 0
+        icon_col, icon_row, icon_col_end, icon_row_end = icon_bounding_box
+        icon_size = (icon_col_end - icon_col, icon_row_end - icon_row)
+        for existing_bbox in existing_bbox_list:
+            ext_col, ext_row, ext_col_end, ext_row_end = existing_bbox
             x_overlap = max(
                 0,
-                min(icon_bounding_box[2], existing_bbox[2])
-                - max(icon_bounding_box[0], existing_bbox[0]),
+                min(icon_col_end, ext_col_end) - max(icon_col, ext_col),
             )
             y_overlap = max(
                 0,
-                min(icon_bounding_box[3], existing_bbox[3])
-                - max(icon_bounding_box[1], existing_bbox[1]),
+                min(icon_row_end, ext_row_end) - max(icon_row, ext_row),
             )
             overlap_area = x_overlap * y_overlap
             icon_area = icon_size[0] * icon_size[1]
             if icon_area > 0:
                 overlap_percentage = overlap_area / icon_area * 100
-        return overlap_percentage
+            max_overlap = max(max_overlap, overlap_percentage)
+        return max_overlap
 
-    def make_synthetic_data(
+    def generate_synthetic_data(
         self,
         choice_num_synthetic=1000,
         choice_num_class=10,
         choice_num_images_per_class=1,
         choice_allowed_overlap_of_images=0.5,
-        ouptut_folder="01_synthetic_data",
+        choice_max_scale_factor=3.0,
+        output_folder="01_synthetic_data",
     ):
         # Create synthetic data by randomly selecting images from the dataset and placing them on a canvas to create new images. The number of synthetic images to create, the number of classes to select for each synthetic image, and the number of images to select from each class can be specified as parameters.
         ## Important:
         # randomly pick choice_num_synthetic times choice_num_class classes from the dataset and randomly select choice_num_images_per_class image from each class to create a new data subset
-        os.makedirs(ouptut_folder, exist_ok=True)
+        os.makedirs(output_folder, exist_ok=True)
         data_synth = {}
         for synth_num in range(choice_num_synthetic):
             selected_classes = random.sample(
@@ -151,6 +152,15 @@ class dataset:
                     # scale icon pixels to be between 0 and 255
                     if icon.max() <= 1.0:
                         icon = (icon * 255).astype(np.uint8)
+                    # scale icon to be between 100 and 500 pixels in width and height
+                    scale_factor = random.uniform(1, choice_max_scale_factor)
+                    icon = cv2.resize(
+                        icon,
+                        (
+                            int(icon.shape[1] * scale_factor),
+                            int(icon.shape[0] * scale_factor),
+                        ),
+                    )
                     icon_height, icon_width = icon.shape[:2]
 
                     while True:
@@ -163,11 +173,11 @@ class dataset:
                             rand_y + icon_height,
                         )
                         # calculate percentage of overlap with existing images on the canvas
-                        max_overlap = 0
-                        overlap_percentage = self.calculate_overlap_percentage(
+
+                        max_overlap = self.calculate_overlap_percentage(
                             icon_bounding_box, rand_bbox_list
                         )
-                        max_overlap = max(max_overlap, overlap_percentage)
+
                         if (
                             max_overlap <= choice_allowed_overlap_of_images
                             and icon_bounding_box[2] <= canvas_width
@@ -176,14 +186,8 @@ class dataset:
                             break
                     # insert the icon on the canvas at the random location
                     print(
-                        f"\t\t Placing a {class_name} image on the canvas with bounding box: {icon_bounding_box} and overlap percentage: {overlap_percentage:.2f}%. Icon pixel values range: {icon.min()} to {icon.max()}."
+                        f"\t\t Placing a {class_name} image on the canvas with bounding box: {icon_bounding_box} and overlap percentage: {max_overlap:.2f}%. Icon scaling factor: {scale_factor:.2f}."
                     )
-                    # image[
-                    #     rand_y : rand_y + icon_height,
-                    #     rand_x : rand_x + icon_width,
-                    #     :,
-                    # ] = icon
-                    # insert icon multiplying it with the canvas to create a more realistic synthetic image
                     image[
                         rand_y : rand_y + icon_height,
                         rand_x : rand_x + icon_width,
@@ -198,27 +202,59 @@ class dataset:
                     )
                     # Add the bounding box of the placed image to the list
                     rand_bbox_list.append(icon_bounding_box)
-                    gt_list.append((class_name, icon_bounding_box))
+                    gt_list.append(
+                        {
+                            "class": class_name,
+                            "bbox": icon_bounding_box,
+                            "overlap": max_overlap,
+                            "scale": scale_factor,
+                        }
+                    )
             # Save the synthetic image and its ground truth labels as a .json file
-            synthetic_image_path = f"{ouptut_folder}/generated_image_{synth_num}.png"
+            synthetic_image_path = f"{output_folder}/generated_image_{synth_num}.png"
             plt.imsave(synthetic_image_path, image)
             with open(
-                f"{ouptut_folder}/generated_image_{synth_num}_gt.json", "w"
+                f"{output_folder}/generated_image_{synth_num}_gt.json", "w"
             ) as gt_file:
                 json.dump(gt_list, gt_file)
 
 
 if __name__ == "__main__":
+    choice_num_synthetic_list = (20,)
+    choice_num_class_list = (10,)
+    choice_num_images_per_class_list = (3,)
+    choice_allowed_overlap_of_images_list = (0, 50)
+    choice_max_scale_factor_list = (3.0,)
     dataset_path = get_dataset_path()
     dataset_obj = dataset(dataset_path)
     dataset_obj._display_classes()
     dataset_obj._list_few_classes(num_classes=5)
     dataset_obj._display_few_images(num_classes=5, num_images_per_class=5)
     dataset_obj._create_dataset_dict()
-    dataset_obj.make_synthetic_data(
-        choice_num_synthetic=20,
-        choice_num_class=10,
-        choice_num_images_per_class=1,
-        choice_allowed_overlap_of_images=50,
-        ouptut_folder="01_synthetic_data",
-    )
+    for (
+        choice_num_synthetic,
+        choice_num_class,
+        choice_num_images_per_class,
+        choice_allowed_overlap_of_images,
+        choice_max_scale_factor,
+    ) in product(
+        choice_num_synthetic_list,
+        choice_num_class_list,
+        choice_num_images_per_class_list,
+        choice_allowed_overlap_of_images_list,
+        choice_max_scale_factor_list,
+    ):
+        dataset_obj.generate_synthetic_data(
+            choice_num_synthetic=choice_num_synthetic,
+            choice_num_class=choice_num_class,
+            choice_num_images_per_class=choice_num_images_per_class,
+            choice_allowed_overlap_of_images=choice_allowed_overlap_of_images,
+            choice_max_scale_factor=choice_max_scale_factor,
+            output_folder=(
+                f"01_synthetic_data_"
+                f"{choice_num_class:02d}_classes_"
+                f"{choice_num_images_per_class:02d}_images_per_class_"
+                f"maxoverlap_{choice_allowed_overlap_of_images:02d}_percent_"
+                f"scale_{choice_max_scale_factor:.1f}"
+            ),
+        )
