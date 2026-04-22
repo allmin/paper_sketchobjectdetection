@@ -18,19 +18,10 @@ IMAGE_DIR = (
     "3.0_max_scaling_factor"
 )
 
-CANDIDATE_LABELS = [
-    "car",
-    "house",
-    "tree",
-    "person",
-    "cat",
-    "dog",
-    "money",
-    "telephone",
-    "chair",
-    "table",
-    "hospital",
-]
+import pandas as pd
+df = pd.read_excel("01_synthetic_data/data_summary.xlsx")
+
+CANDIDATE_LABELS = df["class"].unique()
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 

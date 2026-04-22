@@ -476,7 +476,7 @@ class MultiIconDataset:
                 scene_dict[cluster][3] = max(scene_dict[cluster][3], y2)  # max y
 
         scene_list = []
-        for scene, bbox in enumerate(scene_dict.items):
+        for scene, bbox in enumerate(scene_dict.items()):
             scene_list.append(
                 {
                     "element_type": "scene",
@@ -490,6 +490,7 @@ class MultiIconDataset:
         return gt_list
 
     def generate_synthetic_data(self, Config):
+        global DF_LIST
         self.num_clusters = Config.num_clusters
         self.minimum_intercluster_distance = 512
         self.cluster_radius = int(self.minimum_intercluster_distance / 2)
@@ -533,18 +534,18 @@ class MultiIconDataset:
 
         # pasting the selected images on the canvas and saving the synthetic image along with its ground truth labels and bounding boxes in a .json file. The ground truth labels will include the class name, bounding box coordinates, overlap percentage, and scale factor for each pasted image.
         gt_list_list = []
-        DF_LIST = []
+        
         for synth_num in range(Config.num_synthetic):
             gt_list = self.form_image_and_save(data_synth, synth_num, output_folder)
             gt_list_list.append(gt_list)
-            DF, outpath = self.summarize_synthetic_data(
+            outpath, DF = self.summarize_synthetic_data(
                 gt_list_list, out_path=os.path.join(output_folder, "data_summary.png")
             )
-            DF["output_folder"] = output_folder
+            DF["output_folder"] = [output_folder] * len(DF)
             if len(DF_LIST) == 0:
                 DF_LIST = DF
             else:
-                DF_LIST = pd.concat(DF_LIST, DF, axis=1)
+                DF_LIST = pd.concat([DF_LIST, DF], axis=0)
         DF_LIST.to_excel("01_synthetic_data/data_summary.xlsx", index=False)
 
     def summarize_synthetic_data(
@@ -625,7 +626,7 @@ class MultiIconDataset:
 
 
 if __name__ == "__main__":
-
+    DF_LIST = []
     @dataclass
     class Config:
         num_synthetic: int
