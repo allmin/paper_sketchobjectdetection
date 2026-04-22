@@ -31,9 +31,12 @@ Code:
 The following categories of detection methods are studied:
 
 - Bottom‑up approaches  
+ - Region up
 
-- Middle‑level approaches  
-- Top‑down approaches  
+- Middle‑level approaches
+ - scene down approach
+
+- Canvas‑down approaches  
 
 Performance is analyzed across different synthetic generation settings.
 
