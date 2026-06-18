@@ -1,2 +1,5 @@
 kagglehub
 openpyxl
+sentence_transformers
+opencv-contrib-python
+matlab-tictoc

@@ -5,7 +5,6 @@ import kagglehub
 import os
 import random
 import numpy as np
-import matplotlib.pyplot as plt
 import matplotlib.image as mpimg
 import json
 from torch import classes
@@ -272,7 +271,7 @@ class MultiIconDataset:
                         )
                         data_synth[synth_num].append(
                             {
-                                "class": class_name,
+                                "represents": class_name,
                                 "image_path": selected_image,
                                 "image": icon_scaled,
                                 "foreground_mask": foreground_mask_scaled,
@@ -450,7 +449,7 @@ class MultiIconDataset:
             )
             image = self.insert_icon_on_canvas(image, icon, paste_x, paste_y)
             # Remove the image data and foreground mask from the metadata to save space in the .json file
-            icon_meta["element_type"] = "icon"
+            icon_meta["element_type"] = "Icon"
             icon_meta["bounding_box"] = icon_bounding_box
             del icon_meta["image"]
             del icon_meta["skip_icon"]
@@ -479,9 +478,9 @@ class MultiIconDataset:
         for scene, bbox in enumerate(scene_dict.items()):
             scene_list.append(
                 {
-                    "element_type": "scene",
-                    "class": f"cluster{scene}",
-                    "bounding_box": bbox,
+                    "element_type": "Scene",
+                    "represents": f"cluster{scene}",
+                    "bounding_box": bbox[-1],
                 }
             )
 
@@ -577,7 +576,7 @@ class MultiIconDataset:
         fig, axs = plt.subplots(2, 3, figsize=(16, 10))
 
         # 1. Histogram of icon classes
-        df["class"].value_counts().plot(kind="bar", ax=axs[0, 0])
+        df["represents"].value_counts().plot(kind="bar", ax=axs[0, 0])
         axs[0, 0].set_title("Histogram of Icon Classes")
         axs[0, 0].set_xlabel("Class")
         axs[0, 0].set_ylabel("Count")
@@ -596,7 +595,7 @@ class MultiIconDataset:
         labels = [f"Img {i}" for i in sorted(df["image_id"].unique())]
         labels.append("Overall")
 
-        axs[0, 1].boxplot(scale_per_image, labels=labels)
+        axs[0, 1].boxplot(scale_per_image, tick_labels=labels)
         axs[0, 1].set_title("Scale Factor Distribution per Image + Overall")
         axs[0, 1].set_ylabel("Scale Factor")
         axs[0, 1].tick_params(axis="x", rotation=45)
@@ -638,18 +637,16 @@ if __name__ == "__main__":
         min_num_overlap_images: int
         max_scale_factor: float
 
-    num_synthetic_list = (3,)
+    num_synthetic_list = (100,)
     num_class_list = (random.randint(5, 20),)
     num_images_per_class_list = ((1, 10),)
     minimum_icons_list = (20,)
     overlap_of_images_list = (
         (0, 0),
-        (0, 5),
-        (5, 10),
     )
     min_num_overlap_images_list = (3,)
     max_scale_factor_list = (3.0,)
-    num_clusters_list = (random.randint(5, 10),)
+    num_clusters_list = (random.randint(3, 6),)
 
     dataset_path = get_dataset_path()
     dataset_obj = MultiIconDataset(
