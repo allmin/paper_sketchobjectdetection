@@ -11,7 +11,9 @@ berlin_classes = [i.split('/')[-1] for i in files]
 
 
 if __name__ == "__main__":
+    
     TEST = False
+    
     if TEST:
         IMAGE_DIRS = glob("test_data/*")
         PREDEFINED_LABELS = ["person","tree","car","calender", "cat", "pounds","house", "church"]
@@ -27,13 +29,13 @@ if __name__ == "__main__":
     object_detection_llm_big = ObjectDetector(method="llm", params={"model_name":"gemma4:31b"}, name='icons')
     object_detection_llm_small = ObjectDetector(method="llm", params={"model_name":"gemma4:latest"}, name='icons')
 
-    pipeline0small = Pipeline([object_detection_llm_small])
-    pipeline0big = Pipeline([object_detection_llm_big])
-    pipeline1small = Pipeline([scene_proposal_kde, object_detection_llm_small])
-    pipeline1big = Pipeline([scene_proposal_kde, object_detection_llm_big])
-    pipeline2 = Pipeline([scene_proposal_kde, icon_proposal_kde, object_detection_clip])
+    pipeline_small = Pipeline([object_detection_llm_small])
+    pipeline_big = Pipeline([object_detection_llm_big])
+    pipeline_scene_small = Pipeline([scene_proposal_kde, object_detection_llm_small])
+    pipeline_scene_big = Pipeline([scene_proposal_kde, object_detection_llm_big])
+    pipeline_clip = Pipeline([scene_proposal_kde, icon_proposal_kde, object_detection_clip])
 
-    selected_pipeline = pipeline1big
+    selected_pipeline = pipeline_clip
 
     IMAGE_DIRS = sorted(IMAGE_DIRS)
     

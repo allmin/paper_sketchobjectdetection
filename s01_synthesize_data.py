@@ -95,14 +95,45 @@ class MultiIconDataset:
         local_y1 = min(local_y1, h)
         return mask[local_y0:local_y1, local_x0:local_x1]
 
+    # def load_image(self, path):
+    #     if path not in self.image_cache.keys():
+    #         img = mpimg.imread(path)
+    #         if img.max() <= 1.0:
+    #             img = (img * 255).astype(np.uint8)
+    #         foreground_mask = self.sketch_to_binary(img)
+    #         self.image_cache[path] = (img, foreground_mask)
+    #     return self.image_cache[path]
+    
     def load_image(self, path):
-        if path not in self.image_cache.keys():
+        if path not in self.image_cache:
             img = mpimg.imread(path)
+
+            # Normalize if needed
             if img.max() <= 1.0:
                 img = (img * 255).astype(np.uint8)
+
+            # Binary mask
             foreground_mask = self.sketch_to_binary(img)
-            self.image_cache[path] = (img, foreground_mask)
+
+            # --- Compute bounding box of foreground ---
+            ys, xs = np.where(foreground_mask > 0)
+
+            if len(xs) == 0 or len(ys) == 0:
+                # No foreground → keep original
+                cropped_img = img
+                cropped_mask = foreground_mask
+            else:
+                x_min, x_max = xs.min(), xs.max()
+                y_min, y_max = ys.min(), ys.max()
+
+                # --- Crop image and mask ---
+                cropped_img = img[y_min:y_max+1, x_min:x_max+1]
+                cropped_mask = foreground_mask[y_min:y_max+1, x_min:x_max+1]
+
+            self.image_cache[path] = (cropped_img, cropped_mask)
+
         return self.image_cache[path]
+
 
     def _display_classes(self):
         classes = os.listdir(self.path)
@@ -244,8 +275,9 @@ class MultiIconDataset:
     def specify_synthetic_data_subsets(self, Config):
         data_synth = {}
         for synth_num in range(Config.num_synthetic):
-            selected_classes = self._sample_classes(Config.num_class)
-            print("Selected classes for the new data subset:", selected_classes)
+            num_class = random.randint(Config.num_class[0], Config.num_class[1])
+            selected_classes = self._sample_classes(num_class)
+            print("Selected classes for the new image:", selected_classes)
             data_synth[synth_num] = []
             while len(data_synth[synth_num]) < Config.minimum_icons:
                 for class_name in selected_classes:
@@ -260,14 +292,12 @@ class MultiIconDataset:
                             icon = (icon * 255).astype(np.uint8)
                         icon_height, icon_width = icon.shape[:2]
                         scaled_size = (
-                            int(icon_height * scale_factor),
-                            int(icon_width * scale_factor),
+                            int(icon_width * scale_factor),   # width
+                            int(icon_height * scale_factor),  # height
                         )
                         icon_scaled = cv2.resize(icon, scaled_size)
                         foreground_mask_scaled = cv2.resize(
-                            foreground_mask,
-                            scaled_size,
-                            interpolation=cv2.INTER_NEAREST,
+                            foreground_mask, scaled_size, interpolation=cv2.INTER_NEAREST
                         )
                         data_synth[synth_num].append(
                             {
@@ -276,7 +306,7 @@ class MultiIconDataset:
                                 "image": icon_scaled,
                                 "foreground_mask": foreground_mask_scaled,
                                 "scale_factor": scale_factor,
-                                "scaled_size": scaled_size[::-1],  # (width, height)
+                                "scaled_size": scaled_size,  # already (width, height)
                             }
                         )
         print(
@@ -349,7 +379,7 @@ class MultiIconDataset:
             for icon_meta in icons:
                 icon_meta["cluster"] = random.choice(list(cluster_center_dict.keys()))
                 icon_meta["cluster_center"] = cluster_center_dict[icon_meta["cluster"]]
-        print(f"Assigned cluster labels to each icon in the synthetic data subsets.")
+        print(f"Assigned cluster labels to each icon in the synthetic image.")
         return data_synth
 
     def is_icon_within_canvas(self, icon_bbox):
@@ -490,7 +520,7 @@ class MultiIconDataset:
 
     def generate_synthetic_data(self, Config):
         global DF_LIST
-        self.num_clusters = Config.num_clusters
+        self.num_clusters = random.randint(Config.num_clusters[0], Config.num_clusters[1])
         self.minimum_intercluster_distance = 512
         self.cluster_radius = int(self.minimum_intercluster_distance / 2)
 
@@ -638,7 +668,7 @@ if __name__ == "__main__":
         max_scale_factor: float
 
     num_synthetic_list = (100,)
-    num_class_list = (random.randint(5, 20),)
+    num_class_list = ((5, 20),)
     num_images_per_class_list = ((1, 10),)
     minimum_icons_list = (20,)
     overlap_of_images_list = (
@@ -646,7 +676,7 @@ if __name__ == "__main__":
     )
     min_num_overlap_images_list = (3,)
     max_scale_factor_list = (3.0,)
-    num_clusters_list = (random.randint(3, 6),)
+    num_clusters_list = ((3, 6),)
 
     dataset_path = get_dataset_path()
     dataset_obj = MultiIconDataset(

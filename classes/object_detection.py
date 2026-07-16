@@ -60,7 +60,7 @@ class ObjectDetector:
         }
     }
 
-    def __init__(self, method, params={}, name=""):
+    def __init__(self, method, params={}, name="", bbox_refiner=None):
         self.method = method.lower()
         self.params = self._assign_default_params(params)
         self.image = None
@@ -68,6 +68,18 @@ class ObjectDetector:
         self.type = 'object_detection'
         self.name = name
         self.detections = []
+        self.bbox_refiner = bbox_refiner
+        self._init_models()
+        self.detected_labels = []
+    
+    def _init_models(self):
+        if self.bbox_refiner is not None:
+            import torch
+            from transformers import AutoProcessor, AutoModelForZeroShotObjectDetection
+            model_id = "IDEA-Research/grounding-dino-tiny"
+            self.gdino_processor = AutoProcessor.from_pretrained(model_id)
+            self.refiner_model = AutoModelForZeroShotObjectDetection.from_pretrained(model_id, device_map="auto")
+
 
     # PARAMETER HANDLING
     def _assign_default_params(self, user_params):
@@ -93,7 +105,7 @@ class ObjectDetector:
             raise ValueError("No image set. Call set_image(image) first.")
         print(f"Running object detection using {self.method}:{self.params}")
         self.detect_objects()
-        self._get_modified_detections()
+        self._refine_bbox()
         return self.detections
 
     def detect_objects(self):
@@ -105,6 +117,7 @@ class ObjectDetector:
 
         else:
             raise ValueError(f"Unknown detection method: {self.method}")
+        self.modified_detections = self._apply_offset(self.detections)
 
     #CLIP
     def _load_clip(self, model_name):
@@ -152,6 +165,8 @@ class ObjectDetector:
         confidence = float(probs[0, idx])
 
         w, h = self.image.size
+
+        self.detected_labels.append(labels[idx])
 
         self.detections = [{
             "label": labels[idx],
@@ -225,6 +240,7 @@ Rules:
         # Convert 1000x1000 → actual image size
         detections = []
         for det in detections_raw:
+            self.detected_labels.append(det["label"])
             try:
                 x1 = int(det["x1"] / 1000 * w)
                 y1 = int(det["y1"] / 1000 * h)
@@ -310,19 +326,19 @@ Rules:
             out.save(file_path)
         return out
     
-    def _get_modified_detections(self):
+    def _apply_offset(self, detections):
         if self.offset[0] == 0 and self.offset[1] == 0:
-            self.modified_detections = self.detections
+            modified_detections = detections
         else:
-            self.modified_detections = []
-            for detection in self.detections:
+            modified_detections = []
+            for detection in detections:
                 modified_detection = detection.copy()
                 modified_detection['x1'] += self.offset[0]
                 modified_detection['y1'] += self.offset[1]
                 modified_detection['x2'] += self.offset[0]
                 modified_detection['y2'] += self.offset[1]
-                self.modified_detections.append(modified_detection)
-                # print(detection, self.offset, modified_detection)
+                modified_detections.append(modified_detection)
+        return modified_detections
     
     def _resize_width(self, image, width):
         w, h = image.size
@@ -330,6 +346,65 @@ Rules:
         new_h = int(h * (new_w / w))
         out = image.resize((new_w, new_h), Image.BICUBIC)
         return out
+    
+    def _refine_bbox(self, box_threshold=0.3, text_threshold=0.3):
+        if self.bbox_refiner is None:
+            return None
+        
+        image = self.image
+        # GroundingDINO expects a list-of-lists for text prompts
+        text_labels = set(self.detected_labels)
+        text_input = [text_labels]
+        text_input = [i for i in text_input if type(i)==str]
+        print(text_input)
+
+        refined_detections = []
+        
+        if self.bbox_refiner == "gdino":
+            time_start = tic()
+            inputs = self.gdino_processor(
+                images=image,
+                text=text_input,
+                return_tensors="pt"
+            ).to(self.refiner_model.device)
+
+            with torch.no_grad():
+                outputs = self.refiner_model(**inputs)
+
+            results = self.gdino_processor.post_process_grounded_object_detection(
+                outputs,
+                inputs.input_ids,
+                threshold=box_threshold,
+                text_threshold=text_threshold,
+                target_sizes=[image.size[::-1]]
+            )
+
+            step_time = toc(time_start)
+
+            
+            result = results[0] 
+
+            for box, score, label in zip(
+                result["boxes"],
+                result["scores"],
+                result["text_labels"]  # safer than "labels"
+            ):
+                x1,y1,x2,y2 = box
+                refined_detections.append({                
+                    "label": label,
+                    "x1": x1,
+                    "y1":y1,
+                    "x2":x2,
+                    "y2": y2,
+                    "step_time":step_time,
+                    "score": float(score.item()),
+                })
+
+            self.refined_detections = refined_detections
+        self.modified_refined_detections = self._apply_offset(self.refined_detections)
+        
+
+
 
             
 if __name__ == "__main__":
@@ -351,7 +426,7 @@ if __name__ == "__main__":
     }
 
     # Initialize detector
-    detector = ObjectDetector(method=method, params=params)
+    detector = ObjectDetector(method=method, params=params, bbox_refiner="gdino")
 
     # Load image
     print(f"Loading test image: {img_path}")
@@ -369,6 +444,9 @@ if __name__ == "__main__":
     # Print results
     print("\n=== DETECTIONS ===")
     for det in detector.detections:
+        print(det)
+    print("\n=== REFINED DETECTIONS ===")
+    for det in detector.modified_refined_detections:
         print(det)
     
     

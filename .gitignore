@@ -4,4 +4,6 @@
 notebooks
 temp
 recycle_bin
-s04_app.py
+s04_apps/__pycache__
+s04_apps/prediction_old.py
+models/sam_vit_b_01ec64.pth

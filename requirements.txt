@@ -3,3 +3,7 @@ openpyxl
 sentence_transformers
 opencv-contrib-python
 matlab-tictoc
+pycocotools
+matplotlib
+onnxruntime 
+onnx
