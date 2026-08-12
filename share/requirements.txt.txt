@@ -1,0 +1,9 @@
+streamlit>=1.32
+torch
+torchvision
+transformers>=4.56.0
+Pillow
+numpy
+scikit-image
+scikit-learn
+huggingface_hub
