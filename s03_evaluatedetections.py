@@ -637,7 +637,7 @@ class Evaluator:
 
 
 if __name__ == "__main__":
-    TEST = False
+    TEST = True
     DATA_DIRS = [p for p in glob("01_synthetic_data/*") if os.path.isdir(p)]
     PIPELINES = ["kde_scene_kde_icon_clip_icons","llm_gemma4-latest_icons","llm_gemma4-31b_icons","kde_scene_llm_gemma4-latest_icons","kde_scene_llm_gemma4-31b_icons"]
     METRICS = ['iou-10','iou-20','iou-30','iou-40','iou-50','iou-60','iou-70','iou-80','iou-90','centerdist-100', 'centerdist-200', 'centerdist-400', 'centerdist-600', 'centerdist-800']
@@ -646,9 +646,9 @@ if __name__ == "__main__":
     SIMILARITY_CACHE = None    
 
     if TEST:
-        PIPELINES = ["kde_scene_llm_gemma4-31b_icons"]
-        METRICS = ['iou-50','iou-60','iou-70','iou-80','iou-90']
-        SEM_THRESHS = [0.34]
+        PIPELINES = ["kde_scene_kde_icon_clip_icons","llm_gemma4-latest_icons","llm_gemma4-31b_icons","kde_scene_llm_gemma4-latest_icons","kde_scene_llm_gemma4-31b_icons"]
+        METRICS = ['iou-30']
+        SEM_THRESHS = [0.375]
         SUPER_SUMMARY = pd.DataFrame()
         SIMILARITY_CACHE = None    
 

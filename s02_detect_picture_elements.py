@@ -1,5 +1,5 @@
 from classes.region_proposal import RegionProposer
-from classes.object_detection import ObjectDetector
+from classes.object_detection import ObjectDetector, ObjectVerifier
 from classes.pipeline import Pipeline
 from glob import glob
 import kagglehub, os
@@ -28,6 +28,7 @@ if __name__ == "__main__":
     object_detection_clip = ObjectDetector(method="clip", params={"predefined_labels":PREDEFINED_LABELS}, name='icons')
     object_detection_llm_big = ObjectDetector(method="llm", params={"model_name":"gemma4:31b"}, name='icons')
     object_detection_llm_small = ObjectDetector(method="llm", params={"model_name":"gemma4:latest"}, name='icons')
+    object_verification_ensemble_small = ObjectVerifier(models=["qwen3.5:9b","llava:7b", "moondream:1.8b", "llama3.2-vision:latest", "gemma4:latest"], judge = "llama3.1:70b", name="ensemble")
 
     pipeline_small = Pipeline([object_detection_llm_small])
     pipeline_big = Pipeline([object_detection_llm_big])
@@ -35,19 +36,17 @@ if __name__ == "__main__":
     pipeline_scene_big = Pipeline([scene_proposal_kde, object_detection_llm_big])
     pipeline_clip = Pipeline([scene_proposal_kde, icon_proposal_kde, object_detection_clip])
 
-    selected_pipeline = pipeline_clip
-
-    IMAGE_DIRS = sorted(IMAGE_DIRS)
-    
-    for IMAGE_DIR in IMAGE_DIRS:
-        if os.path.isdir(IMAGE_DIR):
-            image_files = sorted(glob(os.path.join(IMAGE_DIR,"*.png")))
-            for image_path in image_files:
-                if "summary" in image_path:
-                    continue
-                print(f"Running pipeline on image: {image_path}")
-                status = selected_pipeline.run(image_path, skip_existing=True)
-                if status:
-                    selected_pipeline.draw_result()
-                else:
-                    print("Skipping this file already processed.")
+    for selected_pipeline in [pipeline_small, pipeline_big, pipeline_scene_small, pipeline_scene_big, pipeline_clip]:
+        IMAGE_DIRS = sorted(IMAGE_DIRS)
+        for IMAGE_DIR in IMAGE_DIRS:
+            if os.path.isdir(IMAGE_DIR):
+                image_files = sorted(glob(os.path.join(IMAGE_DIR,"*.png")))
+                for image_path in image_files:
+                    if "summary" in image_path:
+                        continue
+                    print(f"Running pipeline on image: {image_path}")
+                    status = selected_pipeline.run(image_path, skip_existing=True)
+                    if status:
+                        selected_pipeline.draw_result()
+                    else:
+                        print("Skipping this file already processed.")

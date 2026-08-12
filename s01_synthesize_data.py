@@ -15,6 +15,8 @@ import math
 import os
 import pandas as pd
 import matplotlib.pyplot as plt
+import math
+from itertools import combinations
 
 # setting random seed for reproducibility
 random.seed(42)
@@ -518,18 +520,51 @@ class MultiIconDataset:
             json.dump(scene_list + gt_list, gt_file)
         return gt_list
 
+    def edge_distance(self, x, y, w, h):
+        return min(x, y, w - x, h - y)
+
+    def farthest_point_sampling(self, n_points, width, height, rng, n_candidates=3000, margin_frac=0.05):
+        margin = margin_frac * min(width, height)
+        points = [(
+            rng.uniform(margin, width - margin),
+            rng.uniform(margin, height - margin),
+        )]
+
+        for _ in range(n_points - 1):
+            best_candidate, best_score = None, -1
+            for _ in range(n_candidates):
+                cx = rng.uniform(margin, width - margin)
+                cy = rng.uniform(margin, height - margin)
+                min_dist_to_points = min(((cx - px) ** 2 + (cy - py) ** 2) ** 0.5 for px, py in points)
+                dist_to_edge = self.edge_distance(cx, cy, width, height)
+                score = min(min_dist_to_points, dist_to_edge)
+                if score > best_score:
+                    best_score, best_candidate = score, (cx, cy)
+            points.append(best_candidate)
+
+        min_dist = math.inf
+        closest_pair = None
+
+        if len(points) >= 2:
+            # Compare every pair of distinct points
+            for pa, pb in combinations(points, 2):
+                d = math.dist(pa, pb)  # Euclidean distance
+                if d < min_dist:
+                    min_dist = d
+                    closest_pair = (pa, pb)
+
+        return points, min_dist
+
+
+
     def generate_synthetic_data(self, Config):
         global DF_LIST
-        self.num_clusters = random.randint(Config.num_clusters[0], Config.num_clusters[1])
-        self.minimum_intercluster_distance = 512
-        self.cluster_radius = int(self.minimum_intercluster_distance / 2)
-
         # create a 4961 x 3508 pixel white canvas to place the selected images on it.
         # choice is based on 300DPI of A3 image
         output_folder = (
             f"01_synthetic_data/"
-            f"{Config.num_clusters:02d}_clusters_"
-            f"{Config.num_class:02d}_classes_"
+            f"{Config.num_clusters[0]:02d}_to_{Config.num_clusters[1]:02d}_clusters_"
+            f"{Config.num_class[0]:02d}_to_{Config.num_class[1]:02d}_classes_"
             f"{Config.num_images_per_class[0]:02d}_to_{Config.num_images_per_class[1]:02d}_images_per_class_"
             f"{Config.minimum_icons:02d}_minimum_icons_"
             f"{Config.min_overlap_of_images:02d}_to_{Config.max_overlap_of_images:02d}_percent_overlap_"
@@ -542,12 +577,27 @@ class MultiIconDataset:
         # Create synthetic data by randomly selecting images from the dataset and placing them on a canvas to create new images.
         # The number of synthetic images to create, the number of classes to select for each synthetic image, and the number of images to select from each class can be specified as parameters.
         data_synth = self.specify_synthetic_data_subsets(Config)
-        data_synth = self.assign_clusters(data_synth)
 
         # The canvas will be used to create a synthetic image by placing the selected images from the dataset on it at random locations.
         for synth_num in range(Config.num_synthetic):
+            self.num_clusters = random.randint(Config.num_clusters[0], Config.num_clusters[1])
+            self.num_icons_per_cluster = Config.num_icon_per_cluster
+            self.cluster_points, self.minimum_intercluster_distance = self.farthest_point_sampling(self.num_clusters, width=4961, height=3508, rng=random.Random(123 + synth_num), n_candidates=3000, margin_frac=0.05 )
+            self.cluster_radius = int(0.4 * self.minimum_intercluster_distance)
+            self.num_icon_per_cluster_list = random.choices([i for i in range(self.num_icons_per_cluster[0], self.num_icons_per_cluster[1]+1)], k=self.num_clusters)
             existing_bbox_list = []  # List to store bounding boxes of placed images
+            icon_per_cluster_dict = {i:0 for i in range(self.num_clusters)}
             for icon_meta in data_synth[synth_num]:
+                icon_meta['cluster'], icon_meta['cluster_center'] = random.choice(list(enumerate(self.cluster_points)))
+                max_num_icons = self.num_icon_per_cluster_list[icon_meta['cluster']]
+                
+                if icon_per_cluster_dict[icon_meta['cluster']] >= max_num_icons:
+                    icon_meta["paste_location"] = (None, None)
+                    icon_meta["overlap_p"] = None
+                    icon_meta["bounding_box"] = None
+                    icon_meta["skip_icon"] = True
+                    continue
+                
                 p_x, p_y, icon_bounding_box, overlap_percentage, skip_icon = (
                     self.get_paste_location(
                         icon_meta,
@@ -559,7 +609,10 @@ class MultiIconDataset:
                 icon_meta["overlap_p"] = overlap_percentage
                 icon_meta["bounding_box"] = icon_bounding_box
                 icon_meta["skip_icon"] = skip_icon
-                existing_bbox_list.append((icon_bounding_box, icon_meta))
+                
+                if not icon_meta["skip_icon"]:
+                    icon_per_cluster_dict[icon_meta['cluster']] += 1
+                    existing_bbox_list.append((icon_bounding_box, icon_meta))
 
         # pasting the selected images on the canvas and saving the synthetic image along with its ground truth labels and bounding boxes in a .json file. The ground truth labels will include the class name, bounding box coordinates, overlap percentage, and scale factor for each pasted image.
         gt_list_list = []
@@ -669,14 +722,15 @@ if __name__ == "__main__":
 
     num_synthetic_list = (100,)
     num_class_list = ((5, 20),)
-    num_images_per_class_list = ((1, 10),)
+    num_images_per_class_list = ((3, 5),)
     minimum_icons_list = (20,)
     overlap_of_images_list = (
         (0, 0),
     )
-    min_num_overlap_images_list = (3,)
+    min_num_overlap_images_list = (0,)
     max_scale_factor_list = (3.0,)
-    num_clusters_list = ((3, 6),)
+    num_clusters_list = ((2, 5),)
+    num_icons_per_cluster = ((3,6),)
 
     dataset_path = get_dataset_path()
     dataset_obj = MultiIconDataset(
@@ -695,6 +749,7 @@ if __name__ == "__main__":
         min_num_overlap_images,
         max_scale_factor,
         num_clusters,
+        num_icon_per_cluster
     ) in product(
         num_synthetic_list,
         num_class_list,
@@ -704,6 +759,7 @@ if __name__ == "__main__":
         min_num_overlap_images_list,
         max_scale_factor_list,
         num_clusters_list,
+        num_icons_per_cluster
     ):
         min_overlap_of_images, max_overlap_of_images = overlap_of_images
         if max_overlap_of_images == 0:
@@ -718,6 +774,7 @@ if __name__ == "__main__":
         Config.min_num_overlap_images = min_num_overlap_images
         Config.max_scale_factor = max_scale_factor
         Config.num_clusters = num_clusters
+        Config.num_icon_per_cluster = num_icon_per_cluster
 
         if max_overlap_of_images - min_overlap_of_images >= 0:
             DF = dataset_obj.generate_synthetic_data(
