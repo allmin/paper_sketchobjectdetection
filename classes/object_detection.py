@@ -23,6 +23,7 @@ import easyocr
 reader = easyocr.Reader(['en','nl'])
 from PIL import Image
 from tqdm import tqdm
+import time, threading, queue
 
 def _run_with_timeout(func, timeout, *args, **kwargs):
     """

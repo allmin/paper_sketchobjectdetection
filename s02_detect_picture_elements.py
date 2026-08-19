@@ -3,7 +3,7 @@ from classes.object_detection import ObjectDetector, ObjectVerifier
 from classes.pipeline import Pipeline
 from glob import glob
 import kagglehub, os
-
+import time
 berlin_path = kagglehub.dataset_download("zara2099/tu-berlin-hand-sketch-image-dataset")
 berlin_path = os.path.join(berlin_path, "TUBerlin", "png_ready")
 files = glob(f"{berlin_path}/*")

@@ -1,0 +1,108 @@
+1<2
+ensemble_verify
+models:   0%|                                                                  | 0/5 [00:00<?, ?it/s[qwen3.5:9b] icon 1/20 -> '[ERROR from qwen3.5:9b: Expecting value: line 1 column 1 (char 0)]' (7.6s)]
+                                                                                                    [qwen3.5:9b] icon 2/20 -> '[ERROR from qwen3.5:9b: Expecting value: line 1 column 1 (char 0)]' (0.6s)]
+                                                                                                    [qwen3.5:9b] icon 3/20 -> '[ERROR from qwen3.5:9b: Expecting value: line 1 column 1 (char 0)]' (0.7s)]
+                                                                                                    [qwen3.5:9b] icon 4/20 -> '[ERROR from qwen3.5:9b: Expecting value: line 1 column 1 (char 0)]' (0.6s)]
+                                                                                                    [qwen3.5:9b] icon 5/20 -> '[ERROR from qwen3.5:9b: Expecting value: line 1 column 1 (char 0)]' (0.7s)]
+                                                                                                    [qwen3.5:9b] icon 6/20 -> '[ERROR from qwen3.5:9b: Expecting value: line 1 column 1 (char 0)]' (0.7s)]
+                                                                                                    [qwen3.5:9b] icon 7/20 -> '[ERROR from qwen3.5:9b: Expecting value: line 1 column 1 (char 0)]' (0.7s)]
+                                                                                                    [qwen3.5:9b] icon 8/20 -> '[ERROR from qwen3.5:9b: Expecting value: line 1 column 1 (char 0)]' (0.7s)]
+                                                                                                    [qwen3.5:9b] icon 9/20 -> '[ERROR from qwen3.5:9b: Expecting value: line 1 column 1 (char 0)]' (0.7s)]
+                                                                                                    [qwen3.5:9b] icon 10/20 -> '[ERROR from qwen3.5:9b: Expecting value: line 1 column 1 (char 0)]' (0.7s)
+                                                                                                    [qwen3.5:9b] icon 11/20 -> '[ERROR from qwen3.5:9b: Expecting value: line 1 column 1 (char 0)]' (0.7s)
+                                                                                                    [qwen3.5:9b] icon 12/20 -> '[ERROR from qwen3.5:9b: Expecting value: line 1 column 1 (char 0)]' (0.7s)
+                                                                                                    [qwen3.5:9b] icon 13/20 -> '[ERROR from qwen3.5:9b: Expecting value: line 1 column 1 (char 0)]' (0.6s)
+                                                                                                    [qwen3.5:9b] icon 14/20 -> '[ERROR from qwen3.5:9b: Expecting value: line 1 column 1 (char 0)]' (0.7s)
+                                                                                                    [qwen3.5:9b] icon 15/20 -> '[ERROR from qwen3.5:9b: Expecting value: line 1 column 1 (char 0)]' (0.7s)
+                                                                                                    [qwen3.5:9b] icon 16/20 -> '[ERROR from qwen3.5:9b: model runner has unexpectedly stopped, this may be due to resource limitations or an internal error, check ollama server logs for details (status code: 500)]' (0.2s)
+                                                                                                    [qwen3.5:9b] icon 17/20 -> '[ERROR from qwen3.5:9b: Expecting value: line 1 column 1 (char 0)]' (0.8s)
+                                                                                                    [qwen3.5:9b] icon 18/20 -> '[ERROR from qwen3.5:9b: Expecting value: line 1 column 1 (char 0)]' (0.6s)
+                                                                                                    [qwen3.5:9b] icon 19/20 -> '[ERROR from qwen3.5:9b: Expecting value: line 1 column 1 (char 0)]' (0.7s)
+                                                                                                    [qwen3.5:9b] icon 20/20 -> '[ERROR from qwen3.5:9b: Expecting value: line 1 column 1 (char 0)]' (0.6s)
+icons [qwen3.5:9b]: 100%|████████████████████████████████████████████| 20/20 [00:20<00:00,  1.01s/it]
+models:  20%|███████████▌                                              | 1/5 [00:20<01:20, 20.13s/it[llava:7b] icon 1/20 -> 'mug' (4.9s)                                           | 0/20 [00:00<?, ?it/s]
+                                                                                                    [llava:7b] icon 2/20 -> 'boat' (0.2s)                                  | 1/20 [00:04<01:32,  4.87s/it]
+                                                                                                    [llava:7b] icon 3/20 -> 'mug' (0.2s)                                   | 2/20 [00:05<00:38,  2.13s/it]
+                                                                                                    [llava:7b] icon 4/20 -> 'kettle' (0.2s)                                | 3/20 [00:05<00:21,  1.25s/it]
+                                                                                                    [llava:7b] icon 5/20 -> 'person' (0.2s)                                | 4/20 [00:05<00:13,  1.19it/s]
+                                                                                                    [llava:7b] icon 6/20 -> 'mermaid' (0.2s)                               | 5/20 [00:05<00:09,  1.63it/s]
+                                                                                                    [llava:7b] icon 7/20 -> 'whale' (0.2s)                                 | 6/20 [00:05<00:06,  2.09it/s]
+                                                                                                    [llava:7b] icon 8/20 -> 'toilet' (0.2s)█▍                              | 7/20 [00:06<00:05,  2.55it/s]
+                                                                                                    [llava:7b] icon 9/20 -> 'apple' (0.2s)████▊                            | 8/20 [00:06<00:04,  2.97it/s]
+                                                                                                    [llava:7b] icon 10/20 -> 'toilet' (0.2s)█████▏                         | 9/20 [00:06<00:03,  3.42it/s]
+                                                                                                    [llava:7b] icon 11/20 -> 'bird' (0.2s)█████████                       | 10/20 [00:06<00:02,  3.72it/s]
+                                                                                                    [llava:7b] icon 12/20 -> 'A' (0.2s)██████████████▎                    | 11/20 [00:06<00:02,  4.02it/s]
+                                                                                                    [llava:7b] icon 13/20 -> 'flower' (0.2s)███████████▌                  | 12/20 [00:07<00:01,  4.33it/s]
+                                                                                                    [llava:7b] icon 14/20 -> 'apple' (0.2s)██████████████▉                | 13/20 [00:07<00:01,  4.52it/s]
+                                                                                                    [llava:7b] icon 15/20 -> 'pen' (0.2s)███████████████████▏             | 14/20 [00:07<00:01,  4.66it/s]
+                                                                                                    [llava:7b] icon 16/20 -> 'cross' (0.2s)███████████████████▌           | 15/20 [00:07<00:01,  4.76it/s]
+                                                                                                    [llava:7b] icon 17/20 -> 'toilet' (0.2s)████████████████████▊         | 16/20 [00:07<00:00,  4.83it/s]
+                                                                                                    [llava:7b] icon 18/20 -> 'apple' (0.2s)████████████████████████       | 17/20 [00:08<00:00,  4.79it/s]
+                                                                                                    [llava:7b] icon 19/20 -> 'toilet' (0.2s)█████████████████████████▍    | 18/20 [00:08<00:00,  4.86it/s]
+                                                                                                    [llava:7b] icon 20/20 -> 'bucket' (0.2s)███████████████████████████▋  | 19/20 [00:08<00:00,  4.74it/s]
+icons [llava:7b]: 100%|██████████████████████████████████████████████| 20/20 [00:08<00:00,  2.27it/s]
+models:  40%|███████████████████████▏                                  | 2/5 [00:28<00:40, 13.47s/it[moondream:1.8b] icon 1/20 -> 'cup' (2.9s)                                     | 0/20 [00:00<?, ?it/s]
+                                                                                                    [moondream:1.8b] icon 2/20 -> 'boat' (0.2s)                            | 1/20 [00:02<00:55,  2.90s/it]
+                                                                                                    [moondream:1.8b] icon 3/20 -> 'cup' (0.2s)                             | 2/20 [00:03<00:23,  1.29s/it]
+                                                                                                    [moondream:1.8b] icon 4/20 -> 'coffee cup' (0.2s)                      | 3/20 [00:03<00:13,  1.29it/s]
+                                                                                                    [moondream:1.8b] icon 5/20 -> 'black and white' (0.2s)                 | 4/20 [00:03<00:08,  1.83it/s]
+                                                                                                    [moondream:1.8b] icon 6/20 -> 'mermaids' (0.2s)                        | 5/20 [00:03<00:06,  2.41it/s]
+                                                                                                    [moondream:1.8b] icon 7/20 -> 'face' (0.2s)                            | 6/20 [00:03<00:04,  2.93it/s]
+                                                                                                    [moondream:1.8b] icon 8/20 -> 'toilet bowl' (0.2s)                     | 7/20 [00:03<00:03,  3.53it/s]
+                                                                                                    [moondream:1.8b] icon 9/20 -> 'apple' (0.2s)██▍                        | 8/20 [00:04<00:02,  4.01it/s]
+                                                                                                    [moondream:1.8b] icon 10/20 -> 'toilet paper' (0.2s)                   | 9/20 [00:04<00:02,  4.54it/s]
+                                                                                                    [moondream:1.8b] icon 11/20 -> 'dental crowns and bridges' (0.2s)     | 10/20 [00:04<00:02,  4.82it/s]
+                                                                                                    [moondream:1.8b] icon 12/20 -> 'L' (0.2s)███████████                  | 11/20 [00:04<00:01,  4.92it/s]
+                                                                                                    [moondream:1.8b] icon 13/20 -> 'flower' (0.1s)████████                | 12/20 [00:04<00:01,  5.24it/s]
+                                                                                                    [moondream:1.8b] icon 14/20 -> 'apple' (0.2s)███████████              | 13/20 [00:04<00:01,  5.61it/s]
+                                                                                                    [moondream:1.8b] icon 15/20 -> 'pencil tip' (0.2s)████████            | 14/20 [00:05<00:01,  5.86it/s]
+                                                                                                    [moondream:1.8b] icon 16/20 -> 'watch' (0.2s)███████████████          | 15/20 [00:05<00:00,  5.88it/s]
+                                                                                                    [moondream:1.8b] icon 17/20 -> 'toilet bowl' (0.2s)███████████        | 16/20 [00:05<00:00,  6.00it/s]
+                                                                                                    [moondream:1.8b] icon 18/20 -> 'apple' (0.2s)███████████████████      | 17/20 [00:05<00:00,  5.64it/s]
+                                                                                                    [moondream:1.8b] icon 19/20 -> 'toilet bowl' (0.2s)███████████████    | 18/20 [00:05<00:00,  5.78it/s]
+                                                                                                    [moondream:1.8b] icon 20/20 -> 'toilet bowl' (0.2s)█████████████████  | 19/20 [00:06<00:00,  5.72it/s]
+icons [moondream:1.8b]: 100%|████████████████████████████████████████| 20/20 [00:06<00:00,  3.23it/s]
+models:  60%|██████████████████████████████████▊                       | 3/5 [00:35<00:20, 10.15s/it[llama3.2-vision:latest] icon 1/20 -> 'cup' (4.0s)                             | 0/20 [00:00<?, ?it/s]
+                                                                                                    [llama3.2-vision:latest] icon 2/20 -> 'ship' (0.8s)                    | 1/20 [00:03<01:15,  3.98s/it]
+                                                                                                    [llama3.2-vision:latest] icon 3/20 -> 'cup' (0.8s)                     | 2/20 [00:04<00:38,  2.13s/it]
+                                                                                                    [llama3.2-vision:latest] icon 4/20 -> 'cup' (0.8s)                     | 3/20 [00:05<00:26,  1.54s/it]
+                                                                                                    [llama3.2-vision:latest] icon 5/20 -> 'Mermaid' (0.9s)                 | 4/20 [00:06<00:20,  1.26s/it]
+                                                                                                    [llama3.2-vision:latest] icon 6/20 -> 'mermaid' (0.8s)                 | 5/20 [00:07<00:16,  1.11s/it]
+                                                                                                    [llama3.2-vision:latest] icon 7/20 -> 'Mermaid' (0.8s)                 | 6/20 [00:08<00:14,  1.01s/it]
+                                                                                                    [llama3.2-vision:latest] icon 8/20 -> 'toilet' (0.8s)                  | 7/20 [00:08<00:12,  1.06it/s]
+                                                                                                    [llama3.2-vision:latest] icon 9/20 -> 'apple' (0.8s)                   | 8/20 [00:09<00:10,  1.11it/s]
+                                                                                                    [llama3.2-vision:latest] icon 10/20 -> 'toilet' (0.8s)                 | 9/20 [00:10<00:09,  1.15it/s]
+                                                                                                    [llama3.2-vision:latest] icon 11/20 -> 'bird' (0.8s)██                | 10/20 [00:11<00:08,  1.18it/s]
+                                                                                                    [llama3.2-vision:latest] icon 12/20 -> 'circle' (0.8s)█▌              | 11/20 [00:12<00:07,  1.20it/s]
+                                                                                                    [llama3.2-vision:latest] icon 13/20 -> 'flower' (0.8s)███▏            | 12/20 [00:12<00:06,  1.22it/s]
+                                                                                                    [llama3.2-vision:latest] icon 14/20 -> 'apple' (0.8s)█████▊           | 13/20 [00:13<00:05,  1.22it/s]
+                                                                                                    [llama3.2-vision:latest] icon 15/20 -> 'pen' (0.8s)█████████▍         | 14/20 [00:14<00:04,  1.23it/s]
+                                                                                                    [llama3.2-vision:latest] icon 16/20 -> 'Bones' (0.8s)█████████        | 15/20 [00:15<00:04,  1.24it/s]
+                                                                                                    [llama3.2-vision:latest] icon 17/20 -> 'toilet' (0.9s)█████████▌      | 16/20 [00:16<00:03,  1.24it/s]
+                                                                                                    [llama3.2-vision:latest] icon 18/20 -> 'apple' (0.9s)████████████▏    | 17/20 [00:17<00:02,  1.22it/s]
+                                                                                                    [llama3.2-vision:latest] icon 19/20 -> 'chair' (0.8s)█████████████▊   | 18/20 [00:17<00:01,  1.19it/s]
+                                                                                                    [llama3.2-vision:latest] icon 20/20 -> 'Toilet' (0.9s)██████████████▍ | 19/20 [00:18<00:00,  1.19it/s]
+icons [llama3.2-vision:latest]: 100%|████████████████████████████████| 20/20 [00:19<00:00,  1.02it/s]
+models:  80%|██████████████████████████████████████████████▍           | 4/5 [00:54<00:13, 13.87s/it[gemma4:latest] icon 1/20 -> '[ERROR from gemma4:latest: Expecting value: line 1 column 1 (char 0)]' (4.5s)
+                                                                                                    [gemma4:latest] icon 2/20 -> '[ERROR from gemma4:latest: Expecting value: line 1 column 1 (char 0)]' (0.6s)
+                                                                                                    [gemma4:latest] icon 3/20 -> '[ERROR from gemma4:latest: Expecting value: line 1 column 1 (char 0)]' (0.6s)
+                                                                                                    [gemma4:latest] icon 4/20 -> '[ERROR from gemma4:latest: Expecting value: line 1 column 1 (char 0)]' (0.4s)
+                                                                                                    [gemma4:latest] icon 5/20 -> '[ERROR from gemma4:latest: Expecting value: line 1 column 1 (char 0)]' (0.4s)
+                                                                                                    [gemma4:latest] icon 6/20 -> '[ERROR from gemma4:latest: Expecting value: line 1 column 1 (char 0)]' (0.4s)
+                                                                                                    [gemma4:latest] icon 7/20 -> '[ERROR from gemma4:latest: Expecting value: line 1 column 1 (char 0)]' (0.4s)
+                                                                                                    [gemma4:latest] icon 8/20 -> '[ERROR from gemma4:latest: Expecting value: line 1 column 1 (char 0)]' (0.4s)
+                                                                                                    [gemma4:latest] icon 9/20 -> '[ERROR from gemma4:latest: Expecting value: line 1 column 1 (char 0)]' (0.4s)
+                                                                                                    [gemma4:latest] icon 10/20 -> '[ERROR from gemma4:latest: Expecting value: line 1 column 1 (char 0)]' (0.3s)
+                                                                                                    [gemma4:latest] icon 11/20 -> '[ERROR from gemma4:latest: Expecting value: line 1 column 1 (char 0)]' (0.6s)
+                                                                                                    [gemma4:latest] icon 12/20 -> '[ERROR from gemma4:latest: Expecting value: line 1 column 1 (char 0)]' (0.4s)
+                                                                                                    [gemma4:latest] icon 13/20 -> '[ERROR from gemma4:latest: Expecting value: line 1 column 1 (char 0)]' (0.3s)
+                                                                                                    [gemma4:latest] icon 14/20 -> '[ERROR from gemma4:latest: Expecting value: line 1 column 1 (char 0)]' (0.4s)
+                                                                                                    [gemma4:latest] icon 15/20 -> '[ERROR from gemma4:latest: Expecting value: line 1 column 1 (char 0)]' (0.4s)
+                                                                                                    [gemma4:latest] icon 16/20 -> '[ERROR from gemma4:latest: Expecting value: line 1 column 1 (char 0)]' (0.5s)
+                                                                                                    [gemma4:latest] icon 17/20 -> '[ERROR from gemma4:latest: Expecting value: line 1 column 1 (char 0)]' (0.4s)
+                                                                                                    [gemma4:latest] icon 18/20 -> '[ERROR from gemma4:latest: Expecting value: line 1 column 1 (char 0)]' (0.4s)
+                                                                                                    [gemma4:latest] icon 19/20 -> '[ERROR from gemma4:latest: Expecting value: line 1 column 1 (char 0)]' (0.4s)
+                                                                                                    [gemma4:latest] icon 20/20 -> '[ERROR from gemma4:latest: Expecting value: line 1 column 1 (char 0)]' (0.5s)
+icons [gemma4:latest]: 100%|█████████████████████████████████████████| 20/20 [00:12<00:00,  1.63it/s]
+models: 100%|██████████████████████████████████████████████████████████| 5/5 [01:07<00:00, 13.40s/it]
