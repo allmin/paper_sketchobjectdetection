@@ -24,6 +24,37 @@ reader = easyocr.Reader(['en','nl'])
 from PIL import Image
 from tqdm import tqdm
 
+def _run_with_timeout(func, timeout, *args, **kwargs):
+    """
+    Run `func` in a daemon thread and enforce a hard wall-clock timeout.
+ 
+    Regular ollama.chat() calls block on a socket read with no timeout of
+    their own, so a single hung/deadlocked model inference (this happens in
+    practice with grammar/schema-constrained decoding on some vision models)
+    freezes the whole pipeline forever. Using a *daemon* thread (rather than
+    e.g. concurrent.futures.ThreadPoolExecutor, whose worker threads are
+    non-daemon and get joined at interpreter shutdown) means that even if the
+    underlying call never returns, it can't block process exit either -- it
+    is simply abandoned.
+ 
+    Returns (status, value) where status is "ok", "timeout", or "error".
+    """
+    result_q = queue.Queue(maxsize=1)
+ 
+    def _runner():
+        try:
+            result_q.put(("ok", func(*args, **kwargs)))
+        except Exception as e:
+            result_q.put(("error", e))
+ 
+    t = threading.Thread(target=_runner, daemon=True)
+    t.start()
+    try:
+        status, value = result_q.get(timeout=timeout)
+        return status, value
+    except queue.Empty:
+        return "timeout", None
+
 class ObjectDetector:
     """
     Generic object detection wrapper supporting:
@@ -536,7 +567,9 @@ class ObjectVerifier:
         judge="llama3.1:70b",
         name="verify",
         method="ensemble",
-        use_known_label = False
+        use_known_label = False,
+        request_timeout = 90,
+        max_predict_tokens = 30,
     ):
         self.models = models
         self.judge = judge
@@ -544,6 +577,16 @@ class ObjectVerifier:
         self.type = 'object_verification'
         self.method = method
         self.use_known_label = use_known_label
+        # Hard wall-clock cap (seconds) placed on every single ollama.chat()
+        # call. Vision-model inference over HTTP has no built-in timeout, so
+        # without this a single stuck/deadlocked call (seen in practice with
+        # JSON-schema-constrained decoding on some vision models, e.g.
+        # moondream/llava) hangs the entire verification run forever.
+        self.request_timeout = request_timeout
+        # Caps how many tokens a model is allowed to generate. Labels are
+        # 1-3 words, so this also guards against a model that technically
+        # "works" but rambles or loops without hitting a natural stop token.
+        self.max_predict_tokens = max_predict_tokens
  
     def _crop_to_bytes(self, image, bbox, tolerance = 0):
         width, height = image.size
@@ -567,8 +610,9 @@ class ObjectVerifier:
  
     def _ask_model(self, model, crop_bytes):
         prompt = "Identify the biggest object shown in this image crop. Keep the label short (1-3 words)."
-        try:
-            response = ollama.chat(
+ 
+        def _call(use_schema):
+            kwargs = dict(
                 model=model,
                 messages=[
                     {
@@ -577,14 +621,43 @@ class ObjectVerifier:
                         "images": [crop_bytes]
                     }
                 ],
-                format=self.LABEL_SCHEMA,
-                options={"temperature": 0.1},
-                keep_alive="10m"
+                options={"temperature": 0.1, "num_predict": self.max_predict_tokens},
+                keep_alive="10m",
             )
-            data = json.loads(response["message"]["content"])
-            return data["label"].strip()
-        except Exception as e:
-            return f"[ERROR from {model}: {e}]"
+            if use_schema:
+                kwargs["format"] = self.LABEL_SCHEMA
+            response = ollama.chat(**kwargs)
+            content = response["message"]["content"]
+            if use_schema:
+                data = json.loads(content)
+                return data["label"].strip()
+            # Freeform fallback: no grammar to satisfy, so it can't get
+            # stuck the same way. Just take the first non-empty line.
+            for line in content.strip().splitlines():
+                line = line.strip().strip('"\'. ')
+                if line:
+                    return line
+            return content.strip()
+ 
+        status, value = _run_with_timeout(_call, self.request_timeout, True)
+ 
+        if status == "ok":
+            return value
+ 
+        if status == "timeout":
+            print(f"[TIMEOUT] model={model} exceeded {self.request_timeout}s on schema-constrained call; "
+                  f"retrying once without JSON schema", flush=True)
+            status2, value2 = _run_with_timeout(_call, self.request_timeout, False)
+            if status2 == "ok":
+                return value2
+            if status2 == "timeout":
+                print(f"[TIMEOUT] model={model} exceeded {self.request_timeout}s again on freeform retry; "
+                      f"giving up on this crop", flush=True)
+                return f"[ERROR from {model}: timeout after {self.request_timeout}s (schema and freeform)]"
+            return f"[ERROR from {model}: {value2}]"
+ 
+        # status == "error"
+        return f"[ERROR from {model}: {value}]"
  
     def _judge(self, model_answers, ocr_text):
         judge_prompt = (
@@ -593,21 +666,39 @@ class ObjectVerifier:
             "Pick or synthesize the single best final label.\n\n"
             "Model responses:\n"
         )
-        
+ 
         for m, ans in model_answers.items():
             judge_prompt += f"- {m}: {ans}\n"
-
+ 
         if ocr_text:
-            judge_prompt = f"""Additionally, a OCR model picked up the following text from the crop: "{ocr_text}" """
-  
-        response = ollama.chat(
-            model=self.judge,
-            messages=[{"role": "user", "content": judge_prompt}],
-            format=self.LABEL_SCHEMA,
-            options={"temperature": 0.1}
-        )
-        data = json.loads(response["message"]["content"])
-        return data["label"].strip()
+            # NOTE: was previously `judge_prompt = f"""..."""`, which threw
+            # away all the model answers built up above and judged on the
+            # OCR text alone. Appending preserves both signals.
+            judge_prompt += f"""\nAdditionally, an OCR model picked up the following text from the crop: "{ocr_text}" """
+ 
+        def _call():
+            response = ollama.chat(
+                model=self.judge,
+                messages=[{"role": "user", "content": judge_prompt}],
+                format=self.LABEL_SCHEMA,
+                options={"temperature": 0.1, "num_predict": self.max_predict_tokens}
+            )
+            data = json.loads(response["message"]["content"])
+            return data["label"].strip()
+ 
+        status, value = _run_with_timeout(_call, self.request_timeout)
+        if status == "ok":
+            return value
+        if status == "timeout":
+            print(f"[TIMEOUT] judge={self.judge} exceeded {self.request_timeout}s; "
+                  f"falling back to first model answer", flush=True)
+        else:
+            print(f"[ERROR] judge={self.judge} failed: {value}; falling back to first model answer", flush=True)
+        # Fallback so one stuck/broken judge call doesn't kill the whole run.
+        for ans in model_answers.values():
+            if ans:
+                return ans
+        return "unknown"
  
     def run(self, image, bboxes, tolerance, known_labels=None):
     # Precompute crops + OCR once, up front
@@ -616,7 +707,7 @@ class ObjectVerifier:
             labels = known_labels
         else:
             labels = [None for i in range(len(bboxes))]
-        
+ 
         for bbox, label in zip(bboxes,labels):
             crop_bytes, crop_img = self._crop_to_bytes(image, bbox, tolerance)
             items.append({
@@ -627,13 +718,19 @@ class ObjectVerifier:
                 "known_label":label,
                 "model_answers": {}
             })
-
+ 
         # One model loaded at a time, reused across every crop
         for model in tqdm(self.models, desc="models"):
-            for item in tqdm(items):
+            for idx, item in enumerate(tqdm(items, desc=f"icons [{model}]")):
+                t0 = time.time()
                 ans = self._ask_model(model, item["crop_bytes"])
-                item["model_answers"][model] = "" if ans.startswith("[ERROR") else ans
-
+                dt = time.time() - t0
+                # Prints unconditionally (with flush) so a hang shows exactly
+                # which model + which icon index it stalled on, instead of
+                # tqdm silently freezing with no diagnostic trail.
+                print(f"[{model}] icon {idx + 1}/{len(items)} -> {ans!r} ({dt:.1f}s)", flush=True)
+                item["model_answers"][model] = "" if str(ans).startswith("[ERROR") else ans
+ 
         # Judge model also loaded once, used for every bbox
         results = []
         for item in items:
@@ -670,8 +767,8 @@ class ObjectVerifier:
  
             # Save crop
             item["crop_img"].save(filepath, format="PNG")
-    
-    
+ 
+ 
     def extract_text_or_false(self, img):
         if hasattr(img, "convert"):
             img = np.array(img)
