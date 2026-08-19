@@ -22,6 +22,7 @@ import ollama
 import easyocr
 reader = easyocr.Reader(['en','nl'])
 from PIL import Image
+from tqdm import tqdm
 
 class ObjectDetector:
     """
@@ -53,7 +54,7 @@ class ObjectDetector:
                 "description": "URL of Ollama server",
                 "min": None,
                 "max": None,
-                "recommended": "http://localhost:11434",
+                "recommended": "http://localhost:11435",
             },
             "model_name": {
                 "description": "LLM model name",
@@ -533,101 +534,140 @@ class ObjectVerifier:
         self,
         models=["qwen3.5:9b", "llava:7b", "moondream:1.8b", "llama3.2-vision:latest", "gemma4:latest"],
         judge="llama3.1:70b",
-        name="ensemble"
+        name="verify",
+        method="ensemble",
+        use_known_label = False
     ):
         self.models = models
         self.judge = judge
         self.name = name
-
-    def _crop_to_bytes(self, image, bbox):
+        self.type = 'object_verification'
+        self.method = method
+        self.use_known_label = use_known_label
+ 
+    def _crop_to_bytes(self, image, bbox, tolerance = 0):
+        width, height = image.size
+        if tolerance!=0:
+            bbox = [max(bbox[0]-tolerance,0), max(bbox[1]-tolerance,0), min(bbox[2]+tolerance,width), min(bbox[3]+tolerance,height)]
         crop = image.crop(bbox)
         buf = BytesIO()
         crop.save(buf, format="PNG")
         return buf.getvalue(), crop
-
+ 
+    # JSON schemas passed to ollama's `format` param. Ollama constrains
+    # generation to match these exactly, so no prompt-craft or string
+    # cleanup is needed to get a bare label back.
+    LABEL_SCHEMA = {
+        "type": "object",
+        "properties": {
+            "label": {"type": "string"}
+        },
+        "required": ["label"]
+    }
+ 
     def _ask_model(self, model, crop_bytes):
+        prompt = "Identify the biggest object shown in this image crop. Keep the label short (1-3 words)."
         try:
             response = ollama.chat(
                 model=model,
                 messages=[
                     {
                         "role": "user",
-                        "content": "What object is shown in this image crop?",
+                        "content": prompt,
                         "images": [crop_bytes]
                     }
-                ]
+                ],
+                format=self.LABEL_SCHEMA,
+                options={"temperature": 0.1},
+                keep_alive="10m"
             )
-            return response["message"]["content"]
+            data = json.loads(response["message"]["content"])
+            return data["label"].strip()
         except Exception as e:
             return f"[ERROR from {model}: {e}]"
-
-    def _judge(self, bbox, model_answers):
+ 
+    def _judge(self, model_answers, ocr_text):
         judge_prompt = (
             "You are an ensemble judge. Multiple vision models were asked to identify "
-            "the object inside a bounding box crop. Your job is to analyze all answers "
-            "and produce a single, best final answer.\n\n"
-            f"Bounding box: {bbox}\n\n"
+            "the biggest object inside a bounding box crop, and each gave a short label.\n"
+            "Pick or synthesize the single best final label.\n\n"
             "Model responses:\n"
         )
-
+        
         for m, ans in model_answers.items():
             judge_prompt += f"- {m}: {ans}\n"
 
-        judge_prompt += "\nFinal answer (one short phrase):"
-
+        if ocr_text:
+            judge_prompt = f"""Additionally, a OCR model picked up the following text from the crop: "{ocr_text}" """
+  
         response = ollama.chat(
             model=self.judge,
-            messages=[{"role": "user", "content": judge_prompt}]
+            messages=[{"role": "user", "content": judge_prompt}],
+            format=self.LABEL_SCHEMA,
+            options={"temperature": 0.1}
         )
-        return response["message"]["content"]
-
-    def run(self, image, bboxes):
-        results = []
-
-        for bbox in bboxes:
-            crop_bytes, crop_img = self._crop_to_bytes(image, bbox)
-            text = self.extract_text_or_false(crop_img)
-
-            model_answers = {}
-            for model in self.models:
-                ans = self._ask_model(model, crop_bytes)
-                model_answers[model] = ans
-
-            final_answer = self._judge(bbox, model_answers)
-
-            results.append({
+        data = json.loads(response["message"]["content"])
+        return data["label"].strip()
+ 
+    def run(self, image, bboxes, tolerance, known_labels=None):
+    # Precompute crops + OCR once, up front
+        items = []
+        if known_labels:
+            labels = known_labels
+        else:
+            labels = [None for i in range(len(bboxes))]
+        
+        for bbox, label in zip(bboxes,labels):
+            crop_bytes, crop_img = self._crop_to_bytes(image, bbox, tolerance)
+            items.append({
                 "bbox": bbox,
-                "text": text,
+                "crop_bytes": crop_bytes,
                 "crop_img": crop_img,
-                "model_answers": model_answers,
-                "final_answer": final_answer
+                "text": self.extract_text_or_false(crop_img),
+                "known_label":label,
+                "model_answers": {}
             })
 
-        return results
+        # One model loaded at a time, reused across every crop
+        for model in tqdm(self.models, desc="models"):
+            for item in tqdm(items):
+                ans = self._ask_model(model, item["crop_bytes"])
+                item["model_answers"][model] = "" if ans.startswith("[ERROR") else ans
 
+        # Judge model also loaded once, used for every bbox
+        results = []
+        for item in items:
+            del item['crop_bytes']
+            evidences = item["model_answers"]
+            if item['known_label'] and self.use_known_label:
+                evidences.update(item['known_label'])
+            final_label = self._judge(evidences, item["text"])
+            results.append({**item, "final_label": final_label})
+        return results
+ 
     def save_crops(self, results, directory):
         """
         Saves crops to disk with filenames:
         model1 + model2 + ... = final_label.png
         """
         os.makedirs(directory, exist_ok=True)
-
+ 
         def clean(text):
             # Remove characters invalid in filenames
             text = re.sub(r"[^\w\s-]", "", text)
             return text.strip().replace(" ", "_")
-
-        for item in results:
+ 
+        for item in tqdm(results):
             answers = item["model_answers"]
-            final = item["final_answer"]
-
+            final = item["final_label"]
+ 
             # Build filename
             parts = [clean(ans) for ans in answers.values()]
             final_clean = clean(final)
-
+ 
             filename = " + ".join(parts) + f" = {final_clean}.png"
             filepath = os.path.join(directory, filename)
-
+ 
             # Save crop
             item["crop_img"].save(filepath, format="PNG")
     
@@ -635,7 +675,7 @@ class ObjectVerifier:
     def extract_text_or_false(self, img):
         if hasattr(img, "convert"):
             img = np.array(img)
-
+ 
         results = reader.readtext(img, detail=0)
         text = " ".join(results).strip()
         return text if text else False
@@ -655,7 +695,7 @@ if __name__ == "__main__":
         params = {
             # For LLM:
             "model_name": "gemma4:latest",
-            "ollama_url": "http://localhost:11434",
+            "ollama_url": "http://localhost:11435",
 
             # For CLIP:
             "predefined_labels": ["car", "person", "tree"],
@@ -700,10 +740,10 @@ if __name__ == "__main__":
     print(f"Loading test image: {img_path}")
     test_img = Image.open(img_path).convert("RGB")
     test_img = detector._resize_width(test_img,1000)
-    verifier = ObjectVerifier(models=["llava:7b", "moondream:1.8b"],judge="llama3.2:latest")
+    verifier = ObjectVerifier(models=["qwen3.5:9b", "llava:7b", "moondream:1.8b", "llama3.2-vision:latest", "gemma4:latest"],judge="llama3.2:latest")
     
     bboxes = [[det['x1'],det['y1'],det['x2'],det['y2']] for det in detections]
-    results = verifier.run(test_img, bboxes)
+    results = verifier.run(test_img, bboxes, 15)
     print(results)
     verifier.save_crops(results, "temp/verifier_results")
         

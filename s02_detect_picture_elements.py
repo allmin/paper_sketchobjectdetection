@@ -28,15 +28,16 @@ if __name__ == "__main__":
     object_detection_clip = ObjectDetector(method="clip", params={"predefined_labels":PREDEFINED_LABELS}, name='icons')
     object_detection_llm_big = ObjectDetector(method="llm", params={"model_name":"gemma4:31b"}, name='icons')
     object_detection_llm_small = ObjectDetector(method="llm", params={"model_name":"gemma4:latest"}, name='icons')
-    object_verification_ensemble_small = ObjectVerifier(models=["qwen3.5:9b","llava:7b", "moondream:1.8b", "llama3.2-vision:latest", "gemma4:latest"], judge = "llama3.1:70b", name="ensemble")
+    object_verification_ensemble_small = ObjectVerifier(models=["qwen3.5:9b","llava:7b", "moondream:1.8b", "llama3.2-vision:latest", "gemma4:latest"], judge = "llama3.1:70b", method="ensemble", name="verify", use_known_label = True)
 
     pipeline_small = Pipeline([object_detection_llm_small])
     pipeline_big = Pipeline([object_detection_llm_big])
     pipeline_scene_small = Pipeline([scene_proposal_kde, object_detection_llm_small])
     pipeline_scene_big = Pipeline([scene_proposal_kde, object_detection_llm_big])
     pipeline_clip = Pipeline([scene_proposal_kde, icon_proposal_kde, object_detection_clip])
+    pipeline_scene_big_verify = Pipeline([scene_proposal_kde, object_detection_llm_big, object_verification_ensemble_small])
 
-    for selected_pipeline in [pipeline_small, pipeline_big, pipeline_scene_small, pipeline_scene_big, pipeline_clip]:
+    for selected_pipeline in [pipeline_scene_big_verify, pipeline_small, pipeline_big, pipeline_scene_small, pipeline_scene_big, pipeline_clip]:
         IMAGE_DIRS = sorted(IMAGE_DIRS)
         for IMAGE_DIR in IMAGE_DIRS:
             if os.path.isdir(IMAGE_DIR):

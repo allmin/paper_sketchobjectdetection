@@ -9,7 +9,7 @@ Author: Allmin
 Created: 2026-06-05
 """
 from classes.region_proposal import RegionProposer
-from classes.object_detection import ObjectDetector
+from classes.object_detection import ObjectDetector, ObjectVerifier
 import cv2, os
 from PIL import Image
 import traceback
@@ -22,11 +22,11 @@ class Pipeline:
     def __init__(self, steps, name=''):
         self.elapsed_time = {}
         self.steps = steps
-        self._obtain_step_name()
+        steps_name = self._obtain_steps_name(self.steps)
         if name:
             self.name = name
         else:
-            self.name = self.steps_name
+            self.name = steps_name
         self.cropped_scene_images = []
         self.cropped_scene_locations= []
         self.scenes = None
@@ -52,16 +52,41 @@ class Pipeline:
         if skip_existing and os.path.exists(self.result_img_path):
             return 0
         
-
-        
-        # if os.path.exists(self.result_folder_path):
-        #     shutil.rmtree(self.result_folder_path)
         os.makedirs(self.result_folder_path, exist_ok=True)
         self.raw_image = image
         self.image = self._preprocess_image(self.raw_image)
         current_output = None
+    
+        min_enum_id = 0
+        for i in range(len(self.steps)-1):
+            filt_steps = self.steps[:-i-1]
+            filt_steps_name = self._obtain_steps_name(filt_steps)
+            print(i, filt_steps_name)
+            filt_step_output = f"02_detected_picture_elements/{filt_steps_name}/{self.folder_name.split('/')[-1]}"
+            filt_step_path = f"{filt_step_output}/{self.file_name}"
+            last_object = self.steps[-i-2]
+            current_object = self.steps[-i-1]
+
+            print(filt_step_path, current_object.type, os.path.exists(filt_step_path))
+            last_method = self.steps[-i-2].method
+            if last_object.type == 'object_detection' and current_object.type == 'object_verification' and os.path.exists(filt_step_path):
+                print(f"The results of pipeline {filt_steps_name} already exist. Loading it")
+                self.load_json_detections(filt_step_path)
+                self.load_json_elapsed_time(filt_step_path)
+                print(self.detections)
+                self.object_detector = last_object
+                self.object_detector_model_name = self.object_detector.params['model_name']
+                min_enum_id = len(self.steps)-1
+                break
+
+
+
         for enumid, step_obj in enumerate(self.steps):
+            if enumid < min_enum_id:
+                print(f"{enumid}<{min_enum_id}")
+                continue
             step_type = f"{step_obj.method}_{step_obj.name}"
+            print(step_type)
             t1 = tic()
             if step_obj.type == 'region_proposal':
                 self.region_proposer = step_obj
@@ -69,6 +94,9 @@ class Pipeline:
             elif step_obj.type == 'object_detection':
                 self.object_detector = step_obj
                 self._run_object_detection()
+            elif step_obj.type == 'object_verification':
+                self.object_verifier = step_obj
+                self._run_object_verification()
             self.elapsed_time[step_type] = toc(t1)
         return 1
     
@@ -99,11 +127,18 @@ class Pipeline:
         detections_list = []
         
         for det in self.detections:    
+            
             detection_dict = {}
             detection_dict["element_type"]= "Icon"
             detection_dict["represents"]= det["label"]
             detection_dict["bounding_box"] = [int(det["x1"]), int(det["y1"]), int(det["x2"]), int(det["y2"])]
-            detection_dict["step_time"] = det["step_time"]
+            
+            if "step_time" in det:
+                detection_dict["step_time"] = det["step_time"]
+            if "model_answers" in det:
+                detection_dict["model_answers"] = det["model_answers"]
+            if "text" in det:
+                detection_dict["text"] = det["text"]
             detections_list.append(detection_dict)
 
         if self.scenes:
@@ -124,6 +159,73 @@ class Pipeline:
         
         with open(file_path.replace('.json', '_time.json'),"w") as f:
             json.dump(self.elapsed_time, f, indent=4)
+
+
+    def load_json_detections(self, file_path):
+        """
+        Loads the *_detected.json file produced by save_json().
+        Returns a list of detection dictionaries with proper types.
+        """
+
+        detected_path = file_path.replace('.png', '_detected.json')
+
+        with open(detected_path, "r") as f:
+            data = json.load(f)
+
+        detections = []
+        scenes = []
+
+        for item in data:
+            print(item)
+            det = {}
+
+            # Required fields
+            det["element_type"] = item.get("element_type")
+            det["represents"] = item.get("represents")
+            det["label"] = det["represents"]
+
+            # Bounding box (ensure ints)
+            bbox = item.get("bounding_box", [])
+            det["bounding_box"] = [int(v) for v in bbox]
+            det['x1'] = det["bounding_box"][0]
+            det['y1'] = det["bounding_box"][1]
+            det['x2'] = det["bounding_box"][2]
+            det['y2'] = det["bounding_box"][3]
+
+            # Optional fields
+            if "step_time" in item:
+                det["step_time"] = item["step_time"]
+
+            if "model_answers" in item:
+                det["model_answers"] = item["model_answers"]
+
+            if "text" in item:
+                det["text"] = item["text"]
+
+            if "cluster_center" in item:
+                det["cluster_center"] = item["cluster_center"]
+
+            if det['element_type'] == 'Icon':
+                detections.append(det)
+            elif det['element_type'] == 'Scene':
+                scenes.append(det)
+
+        self.scenes = [scene['bounding_box'] for scene in scenes]
+        self.detections = detections
+
+    def load_json_elapsed_time(self, file_path):
+        """
+        Loads the *_detected.json file produced by save_json().
+        Returns a list of detection dictionaries with proper types.
+        """
+
+        detected_path = file_path.replace('.png', '_time.json')
+
+        with open(detected_path, "r") as f:
+            data = json.load(f)
+        times = data
+        self.elapsed_time = data
+
 
     def _run_region_proposal(self):
         if len(self.cropped_scene_images)==0:
@@ -175,9 +277,22 @@ class Pipeline:
         else:
             raise ModuleNotFoundError("No Region Proposer found. please add it to the pipeline before the object detection or use an llm object detector")
         labels = "-".join([i['label'] for i in self.detections])
-        # os.makedirs(f"{self.result_folder_path}/02_{self.object_detector.method}_{self.object_detector.name}", exist_ok=True)
-        # self.object_detector.image.save(f"{self.result_folder_path}/02_{self.object_detector.method}_{self.object_detector.name}/object_{img_id}_{offset[0]}-{offset[1]}_{labels}.png")
     
+    
+    def _run_object_verification(self):
+        if hasattr(self,  'object_detector'):
+            self.verified_detections = []
+            if self.detections:
+                tol = 5
+                bboxes = [[det['x1'],det['y1'],det['x2'],det['y2']] for det in self.detections]
+                known_labels = [{self.object_detector_model_name:det['represents']} for det in self.detections]
+                verified_objects = self.object_verifier.run(self.image, bboxes, tol, known_labels)
+                for det, veridit in zip(self.detections, verified_objects):
+                    det['text'] = veridit['text']
+                    det['model_answers'] = veridit['model_answers']
+                    det['detector_label'] = det['label']
+                    det['label'] = veridit['final_label']
+
     def draw_result(self):
         img_path = f"{self.result_folder_path}/{self.file_name}"
         json_path = f"{self.result_folder_path}/{self.file_name.split('.')[0]+'.json'}"
@@ -188,9 +303,10 @@ class Pipeline:
         else:
             raise ValueError("Detection not found. Run the pipelinefirst.")
     
-    def _obtain_step_name(self):
+    def _obtain_steps_name(self, steps):
         get_model_name = lambda x: x.params["model_name"].replace(':','-')
-        self.steps_name = '_'.join([f"{i.method}_{get_model_name(i)}_{i.name}" if (i.method=='llm') else f"{i.method}_{i.name}" for i in self.steps])
+        steps_name = '_'.join([f"{i.method}_{get_model_name(i)}_{i.name}" if (i.method=='llm') else f"{i.method}_{i.name}" for i in steps])
+        return steps_name
     
     def _offset_bbox(self, offset, bbox):
         return [bbox[0]+offset[0], bbox[1]+offset[1], bbox[2]+offset[0], bbox[3]+offset[1]]
@@ -209,9 +325,15 @@ class Pipeline:
 
 if __name__ == "__main__":
     PREDEFINED_LABELS = ["person","tree","car","calender", "cat", "pounds","house", "church"]
-    scene_proposal = RegionProposer(method="dbscan", params={"epsilon":15, "min_sample":1}, name='scene')   
+    scene_proposal_kde = RegionProposer(method="kde", params={"kde_thresh":0.3}, name='scene')   
     icon_proposal = RegionProposer(method="dbscan", params={"epsilon":1, "min_sample":1}, name='object')   
     object_detection_clip = ObjectDetector(method="Clip", params={"predefined_labels":PREDEFINED_LABELS}, name='label')
-    pipeline = Pipeline([scene_proposal, icon_proposal, object_detection_clip])
-    pipeline.run("test_data/synthdata/image_000.png")
-    pipeline.draw_result()
+    object_detection_llm_big = ObjectDetector(method="llm", params={"model_name":"gemma4:31b"}, name='icons')
+    object_verification_ensemble_small = ObjectVerifier(models=["qwen3.5:9b","llava:7b", "moondream:1.8b", "llama3.2-vision:latest", "gemma4:latest"], judge = "llama3.1:70b", method="ensemble", name="verify", use_known_label = True)
+    # pipeline = Pipeline([scene_proposal, object_detection_llm_big, object_verifier])
+    pipeline_scene_big_verify = Pipeline([scene_proposal_kde, object_detection_llm_big, object_verification_ensemble_small])
+
+    
+    # pipeline.run("test_data/synthdata/image_000.png")
+    pipeline_scene_big_verify.run("01_synthetic_data/02_to_05_clusters_05_to_20_classes_03_to_05_images_per_class_20_minimum_icons_00_to_00_percent_overlap_00_minimum_overlap_images_3.0_max_scaling_factor/image_092.png")
+    pipeline_scene_big_verify.draw_result()

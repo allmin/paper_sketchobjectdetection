@@ -324,11 +324,13 @@ class Evaluator:
     def get_matchings(self, pred_df, gt_df, consider_proximity):
         tp, fp, fn = [], [], []
         gt_matched = []
+        gt_df['gt_represents'] = gt_df['represents'].copy()
         for pred_ind, pred_row in pred_df.iterrows():
             match_found = False
             for gt_ind, gt_row in gt_df.iterrows():
                 if self.is_element_match(pred_row, gt_row, consider_proximity):
-                    merged = pd.concat([pred_row, gt_row], axis=0)
+                    gt_row_filtered = gt_row.drop(labels=['represents'])
+                    merged = pd.concat([pred_row, gt_row_filtered], axis=0)
                     merged = merged.to_frame().T  # make it a single-row DataFrame
                     if gt_ind not in gt_matched:
                         tp.append(merged)
@@ -346,46 +348,6 @@ class Evaluator:
         fn_df = pd.concat(fn, ignore_index=True) if len(fn)>0 else pd.DataFrame()
         return tp_df, fp_df, fn_df
 
-    # def get_matchings(self, pred_df, gt_df, consider_proximity):
-    #     """
-    #     Greedy one-to-one matching: each prediction is matched to at most
-    #     one GT box (its best-scoring valid candidate that is not already
-    #     claimed by an earlier prediction), and each GT box can be claimed
-    #     by at most one prediction.
-    #     """
-    #     tp, fp, fn = [], [], []
-    #     gt_matched = set()
-    
-    #     for pred_ind, pred_row in pred_df.iterrows():
-    #         best_gt_ind = None
-    #         best_score = -1.0
-    #         best_gt_row = None
-    
-    #         for gt_ind, gt_row in gt_df.iterrows():
-    #             if gt_ind in gt_matched:
-    #                 continue  # already claimed by an earlier prediction
-    #             is_match, score = self.is_element_match(pred_row, gt_row, consider_proximity)
-    #             if is_match and score > best_score:
-    #                 best_score = score
-    #                 best_gt_ind = gt_ind
-    #                 best_gt_row = gt_row
-    
-    #         if best_gt_ind is not None:
-    #             merged = pd.concat([pred_row, best_gt_row], axis=0)
-    #             merged = merged.to_frame().T
-    #             tp.append(merged)
-    #             gt_matched.add(best_gt_ind)
-    #         else:
-    #             fp.append(pred_row.to_frame().T)
-    
-    #     for gt_ind, gt_row in gt_df.iterrows():
-    #         if gt_ind not in gt_matched:
-    #             fn.append(gt_row.to_frame().T)
-    
-    #     tp_df = pd.concat(tp, ignore_index=True) if len(tp) > 0 else pd.DataFrame()
-    #     fp_df = pd.concat(fp, ignore_index=True) if len(fp) > 0 else pd.DataFrame()
-    #     fn_df = pd.concat(fn, ignore_index=True) if len(fn) > 0 else pd.DataFrame()
-    #     return tp_df, fp_df, fn_df
 
     def get_metrics(self, tp_df,fp_df,fn_df):
         tp = len(tp_df)
@@ -428,11 +390,60 @@ class Evaluator:
         summary_df = pd.DataFrame(summary_dict)
         return summary_df
 
+    def visualize_image(self, image_path, gt_df, tp_df, fp_df, fn_df, save_path):
+        """
+        Draws:
+        - GT boxes in YELLOW
+        - TP boxes in GREEN
+        - FP boxes in RED
+        - FN boxes in ORANGE
+        """
+
+        img = self.open_image(image_path).convert("RGB")
+        draw = ImageDraw.Draw(img)
+
+        # Colors
+        COLOR_GT = (255, 255, 0)     # yellow
+        COLOR_TP = (0, 255, 0)       # green
+        COLOR_FP = (255, 0, 0)       # red
+        COLOR_FN = (255, 165, 0)     # orange
+        # Helper to draw boxes
+        def draw_box(row, color, tag):
+            box = row["reconst_bounding_box"] if "reconst_bounding_box" in row else row["bounding_box"]
+            x1, y1, x2, y2 = box
+
+            # FN gets thicker line
+            line_width = 3
+            # 5 if tag == "FN" else 3
+            offset = 10 if (tag in ("TP","FP")) else 0
+
+            draw.rectangle([x1, y1, x2, y2], outline=color, width=line_width)
+
+            draw.text((x1, y1+offset), f"{tag}: {row['represents']}", fill=color)
+
+        # Draw GT
+        for _, row in gt_df.iterrows():
+            draw_box(row, COLOR_GT, "GT")
+
+        # Draw TP
+        for _, row in tp_df.iterrows():
+            draw_box(row, COLOR_TP, "TP")
+
+        # Draw FP
+        for _, row in fp_df.iterrows():
+            draw_box(row, COLOR_FP, "FP")
+
+        # Draw FN
+        for _, row in fn_df.iterrows():
+            draw_box(row, COLOR_FN, "FN")
+
+        img.save(save_path)
 
 
     def evaluate(self, data_dir, pipeline_name, target_element_type = 'Icon', normalized_box=False,):
         global SUPER_SUMMARY
         self.pipeline = pipeline_name
+        self.out_mega_folder = f"03_evaluation/{pipeline_name}"
         result_dict = {}
         result_df = {}
         tp_dfs = {True:[], False:[]}
@@ -485,6 +496,21 @@ class Evaluator:
             #Icons
             for consider_proximity in [True, False]:
                 tp_df,fp_df,fn_df = self.get_matchings(pred_df, gt_df, consider_proximity=consider_proximity)
+
+                vis_out_folder = f"{self.out_mega_folder}/annotated_images/{'with_bbox' if consider_proximity else 'no_bbox'}"
+                os.makedirs(vis_out_folder, exist_ok=True)
+                image_path = gt_path.replace("_gt.json", ".png")
+                save_path = f"{vis_out_folder}/{fname.replace('.json', '')}.png"
+
+                self.visualize_image(
+                    image_path=image_path,
+                    gt_df=gt_df,
+                    tp_df=tp_df,
+                    fp_df=fp_df,
+                    fn_df=fn_df,
+                    save_path=save_path
+                )
+                                
                 tp, fp, fn, precision, recall = self.get_metrics(tp_df,fp_df,fn_df)
                 for k,v in {'image':fname, 'tp':tp, 'fp':fp, 'fn':fn, 'precision':precision, 'recall':recall}.items():
                     if consider_proximity not in result_dict:
@@ -540,10 +566,11 @@ class Evaluator:
         #################################
         for consider_proximity in [True, False]:
             result_df[consider_proximity] = pd.DataFrame(result_dict[consider_proximity])
-        self.out_mega_folder = f"03_evaluation/{pipeline_name}"
+        
         out_folder = f"{self.out_mega_folder}/{self.proximity_metric}_sim-{self.semantic_threshold}/{target_element_type}"
         os.makedirs(out_folder, exist_ok=True)
         out_path = f"{out_folder}/results.xlsx"
+        
 
         if self.run_once:
             with pd.ExcelWriter(f"{self.out_mega_folder}/Pred-GT.xlsx", engine="openpyxl") as writer:
@@ -586,51 +613,6 @@ class Evaluator:
                     bbox_str = "-".join([str(i) for i in bbox])
                     img_cropped = img.crop(bbox)
                     # img_cropped.save(f"{out_folder_image}/{input_image_path.split('/')[-1].replace('.png','-' + label + '-' + bbox_str)}.png")
-        
-        
-        # for indc,df in enumerate([GT_DF, PRED_DF]):
-            
-        #     for uid in df.uid.unique():
-        #         input_image_path = uid.replace('_gt.json','.png')
-        #         canvas = Image.open(input_image_path).convert("RGB")
-        #         draw = ImageDraw.Draw(canvas)
-        #         font = ImageFont.load_default()
-        #         dfu = df[df.uid==uid]
-        #         for indr, row in dfu.iterrows():
-        #             if indc == 0:
-        #                 label = row['represents']
-        #                 bbox = row['bounding_box']
-        #                 color = "#d62728"
-        #                 prefix = "gt"
-        #             if indc == 1:
-        #                 label = 'p_'+row['represents']
-        #                 bbox = row['reconst_bounding_box']
-        #                 color = "#1f77b4"
-        #                 prefix = 'pred'
-    
-        #             etype = row.get("element_type", "Unknown")
-        #             x0, y0, x1, y1 = bbox
-
-                
-        #             # Draw box
-        #             line_width = 4 if etype == "Scene" else 3
-        #             draw.rectangle([x0, y0, x1, y1], outline=color, width=line_width)
-                
-        #             # Draw label with background for readability
-        #             text = f"{label} ({etype})"
-        #             bbox = draw.textbbox((0, 0), text, font=font)
-        #             tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
-                
-        #             # Place label above the box if there's room, else inside top
-        #             ty = y0 - th - 8 if y0 - th - 8 > 0 else y0 + 4
-        #             tx = x0
-                
-        #             draw.rectangle([tx, ty, tx + tw + 8, ty + th + 8], fill=color)
-        #             draw.text((tx + 4, ty + 2), text, fill="white", font=font)
-            
-        #         OUT_PATH = f"{out_folder_image}/{input_image_path.split('/')[-1].replace('.png','annotations_'+prefix)}.png"
-        #         canvas.save(OUT_PATH)
-        #     print('Saved GT PRED bbox in ',OUT_PATH)
         similarity_cache = self.get_similarity_cache()
         
         return summary_df, similarity_cache
@@ -639,7 +621,7 @@ class Evaluator:
 if __name__ == "__main__":
     TEST = True
     DATA_DIRS = [p for p in glob("01_synthetic_data/*") if os.path.isdir(p)]
-    PIPELINES = ["kde_scene_kde_icon_clip_icons","llm_gemma4-latest_icons","llm_gemma4-31b_icons","kde_scene_llm_gemma4-latest_icons","kde_scene_llm_gemma4-31b_icons"]
+    PIPELINES = ["kde_scene_kde_icon_clip_icons","llm_gemma4-latest_icons","llm_gemma4-31b_icons","kde_scene_llm_gemma4-latest_icons","kde_scene_llm_gemma4-31b_icons","kde_scene_llm_gemma4-31b_icons_ensemble_verify"]
     METRICS = ['iou-10','iou-20','iou-30','iou-40','iou-50','iou-60','iou-70','iou-80','iou-90','centerdist-100', 'centerdist-200', 'centerdist-400', 'centerdist-600', 'centerdist-800']
     SEM_THRESHS = [0.1, 0.2, 0.3, 0.4, 0.5,0.6,0.7,0.8,0.9]
     SUPER_SUMMARY = pd.DataFrame()
@@ -647,6 +629,7 @@ if __name__ == "__main__":
 
     if TEST:
         PIPELINES = ["kde_scene_kde_icon_clip_icons","llm_gemma4-latest_icons","llm_gemma4-31b_icons","kde_scene_llm_gemma4-latest_icons","kde_scene_llm_gemma4-31b_icons"]
+        PIPELINES = ["kde_scene_llm_gemma4-31b_icons_ensemble_verify"]
         METRICS = ['iou-30']
         SEM_THRESHS = [0.375]
         SUPER_SUMMARY = pd.DataFrame()

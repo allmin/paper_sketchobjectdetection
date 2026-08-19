@@ -72,7 +72,7 @@ def load_dinov3(model_id: str):
 @st.cache_resource(show_spinner="Loading CLIP (used only to score/label regions)...")
 def load_clip():
     processor = CLIPProcessor.from_pretrained(CLIP_MODEL_ID)
-    model = CLIPModel.from_pretrained(CLIP_MODEL_ID)
+    model = CLIPModel.from_pretrained(CLIP_MODEL_ID, use_safetensors=True)
     model.to(DEVICE).eval()
     return processor, model
 
