@@ -610,7 +610,7 @@ class ObjectVerifier:
     }
  
     def _ask_model(self, model, crop_bytes):
-        prompt = "Identify the biggest object shown in this image crop. Keep the label short (1-3 words)."
+        prompt = "Identify the object shown in this crop of a drawing. Keep the label short (1-3 words)."
  
         def _call(use_schema):
             kwargs = dict(
@@ -624,6 +624,7 @@ class ObjectVerifier:
                 ],
                 options={"temperature": 0.1, "num_predict": self.max_predict_tokens},
                 keep_alive="10m",
+                think = False
             )
             if use_schema:
                 kwargs["format"] = self.LABEL_SCHEMA
@@ -663,7 +664,7 @@ class ObjectVerifier:
     def _judge(self, model_answers, ocr_text):
         judge_prompt = (
             "You are an ensemble judge. Multiple vision models were asked to identify "
-            "the biggest object inside a bounding box crop, and each gave a short label.\n"
+            "the object inside a crop of a drawing, and each gave a short label.\n"
             "Pick or synthesize the single best final label.\n\n"
             "Model responses:\n"
         )
@@ -734,15 +735,18 @@ class ObjectVerifier:
  
         # Judge model also loaded once, used for every bbox
         results = []
-        for item in items:
+        for idx, item in enumerate(tqdm(items, desc=f"judge [{self.judge}]")):
             del item['crop_bytes']
             evidences = item["model_answers"]
             if item['known_label'] and self.use_known_label:
                 evidences.update(item['known_label'])
+            t0 = time.time()
             final_label = self._judge(evidences, item["text"])
+            dt = time.time() - t0
+            print(f"[judge:{self.judge}] icon {idx + 1}/{len(items)} -> {final_label!r} ({dt:.1f}s)", flush=True)
             results.append({**item, "final_label": final_label})
         return results
- 
+
     def save_crops(self, results, directory):
         """
         Saves crops to disk with filenames:
@@ -838,7 +842,7 @@ if __name__ == "__main__":
     print(f"Loading test image: {img_path}")
     test_img = Image.open(img_path).convert("RGB")
     test_img = detector._resize_width(test_img,1000)
-    verifier = ObjectVerifier(models=["qwen3.5:9b", "llava:7b", "moondream:1.8b", "llama3.2-vision:latest", "gemma4:latest"],judge="llama3.2:latest")
+    verifier = ObjectVerifier(models=["ministral-3:8b", "llava:7b", "moondream:1.8b", "llama3.2-vision:latest", "gemma4:latest"],judge="llama3.1:8b")
     
     bboxes = [[det['x1'],det['y1'],det['x2'],det['y2']] for det in detections]
     results = verifier.run(test_img, bboxes, 15)

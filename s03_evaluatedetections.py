@@ -337,7 +337,7 @@ class Evaluator:
                         match_found = True
                         gt_matched.append(gt_ind)
                         break
-            if not match_found:
+            if not match_found and pred_row['represents']:
                 fp.append(pred_row.to_frame().T)
         for gt_ind, gt_row in gt_df.iterrows():
             if gt_ind not in gt_matched:
@@ -440,7 +440,7 @@ class Evaluator:
         img.save(save_path)
 
 
-    def evaluate(self, data_dir, pipeline_name, target_element_type = 'Icon', normalized_box=False,):
+    def evaluate(self, data_dir, pipeline_name, ref_path, target_element_type = 'Icon', normalized_box=False,):
         global SUPER_SUMMARY
         self.pipeline = pipeline_name
         self.out_mega_folder = f"03_evaluation/{pipeline_name}"
@@ -452,7 +452,14 @@ class Evaluator:
         GT_DF = pd.DataFrame()
         PRED_DF = pd.DataFrame()
         
-        for fname in tqdm(sorted(os.listdir(data_dir))):
+        json_files = sorted([f for f in os.listdir(data_dir) if f.endswith(".json")])
+
+        ref_files = glob(ref_path)
+        json_ref_files = [os.path.basename(full_path).rstrip('_detected.json') for full_path in ref_files]
+
+        json_files = [i for i in json_files if any([j in i for j in json_ref_files])]
+
+        for fname in tqdm(json_files):
             if (not fname.endswith(".json")) or ("data_summary" in fname):
                 continue
             # print(f"evaluating {fname}")
@@ -626,10 +633,15 @@ if __name__ == "__main__":
     SEM_THRESHS = [0.1, 0.2, 0.3, 0.4, 0.5,0.6,0.7,0.8,0.9]
     SUPER_SUMMARY = pd.DataFrame()
     SIMILARITY_CACHE = None    
+    REF_PATH = "/home/P103236/projects/paper_sketchobjectdetection/02_detected_picture_elements/kde_scene_llm_gemma4-31b_icons_ensemble_verify/02_to_05_clusters_05_to_20_classes_03_to_05_images_per_class_20_minimum_icons_00_to_00_percent_overlap_00_minimum_overlap_images_3.0_max_scaling_factor/image_*_detected.json"
 
     if TEST:
-        PIPELINES = ["kde_scene_kde_icon_clip_icons","llm_gemma4-latest_icons","llm_gemma4-31b_icons","kde_scene_llm_gemma4-latest_icons","kde_scene_llm_gemma4-31b_icons"]
-        PIPELINES = ["kde_scene_llm_gemma4-31b_icons_ensemble_verify"]
+        PIPELINES = []#["kde_scene_kde_icon_clip_icons","llm_gemma4-latest_icons","llm_gemma4-31b_icons","kde_scene_llm_gemma4-latest_icons","kde_scene_llm_gemma4-31b_icons","kde_scene_llm_gemma4-31b_icons_ensemble_verify","kde_scene_llm_gemma4-31b_icons_ensemble_verify_w_majority","kde_scene_llm_gemma4-31b_icons_ensemble_verify_ignore_big"]
+        for TARGET_MODEL in ["ministral-3:8b","llava:7b", "moondream:1.8b", "llama3.2-vision:latest", "minicpm-v:8b"]:
+            PIPELINES.append(f"kde_scene_llm_gemma4-31b_icons_ensemble_verify_{TARGET_MODEL}_only")
+
+        print(PIPELINES)
+        # PIPELINES = ["kde_scene_llm_gemma4-31b_icons_ensemble_verify"]
         METRICS = ['iou-30']
         SEM_THRESHS = [0.375]
         SUPER_SUMMARY = pd.DataFrame()
@@ -643,7 +655,7 @@ if __name__ == "__main__":
                 for target_element in ['Icon']:
                     print(f"evaluating pipeline {pipeline} | {METRIC} | {SEM_THRESH}")
                     for data_dir in DATA_DIRS:
-                        summary_df, similarity_cache = evaluator.evaluate(data_dir, pipeline_name=pipeline, normalized_box = True, target_element_type=target_element)
+                        summary_df, similarity_cache = evaluator.evaluate(data_dir, pipeline_name=pipeline, ref_path=REF_PATH, normalized_box = True, target_element_type=target_element)
                         if 'metric' not in SUPER_SUMMARY.columns:
                             SUPER_SUMMARY['metric'] = summary_df['metric'].copy().reset_index(drop=True)
                         if run_once:
