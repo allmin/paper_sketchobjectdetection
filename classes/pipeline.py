@@ -285,7 +285,11 @@ class Pipeline:
             if self.detections:
                 tol = 5
                 bboxes = [[det['x1'],det['y1'],det['x2'],det['y2']] for det in self.detections]
-                known_labels = [{self.object_detector_model_name:det['represents']} for det in self.detections]
+                # The detector's model name and the 'represents' key are only set when
+                # detections were loaded from an earlier run; derive them for fresh detections too.
+                model_name = getattr(self, 'object_detector_model_name', None) or \
+                             self.object_detector.params.get('model_name', self.object_detector.method)
+                known_labels = [{model_name: det.get('represents', det.get('label'))} for det in self.detections]
                 verified_objects = self.object_verifier.run(self.image, bboxes, tol, known_labels)
                 for det, veridit in zip(self.detections, verified_objects):
                     det['text'] = veridit['text']
