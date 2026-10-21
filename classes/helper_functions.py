@@ -540,7 +540,7 @@ import re
 import requests
 from io import BytesIO
 
-def run_vllm(pil_img, visualize=False, ollama_url="http://localhost:11435"):
+def run_vllm(pil_img, visualize=False, ollama_url="http://localhost:11434"):
     """
     Use Ollama (gemma3:27b) to detect scene bounding boxes in a sketch image.
     Returns a list of [x1, y1, x2, y2] boxes in pixel coordinates.
@@ -655,7 +655,7 @@ Example output format:
 
     return scene_bboxes
 
-def full_image_detect_label_llm(pil_img, ollama_url="http://localhost:11435", visualize=True):
+def full_image_detect_label_llm(pil_img, ollama_url="http://localhost:11434", visualize=True):
     """
     Detect and label individual objects in an image using Ollama gemma4:31b.
     Model returns bboxes in 1000x1000 scale → transformed to actual image dimensions.

@@ -86,7 +86,7 @@ class ObjectDetector:
                 "description": "URL of Ollama server",
                 "min": None,
                 "max": None,
-                "recommended": "http://localhost:11435",
+                "recommended": "http://localhost:11434",
             },
             "model_name": {
                 "description": "LLM model name",
@@ -797,7 +797,7 @@ if __name__ == "__main__":
         params = {
             # For LLM:
             "model_name": "gemma4:latest",
-            "ollama_url": "http://localhost:11435",
+            "ollama_url": "http://localhost:11434",
 
             # For CLIP:
             "predefined_labels": ["car", "person", "tree"],
