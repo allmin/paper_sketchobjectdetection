@@ -108,6 +108,13 @@ class ObjectDetector:
         self.bbox_refiner = bbox_refiner
         self._init_models()
         self.detected_labels = []
+        self.SUPPORTED_LANGUAGES = {"nl": "Dutch", "en": "English"}
+        self.language = "en"
+        self._EXAMPLES = {
+            "nl": ('fiets', 'persoon'),
+            "en": ('bicycle', 'person'),
+        }
+
     
     def _init_models(self):
         if self.bbox_refiner is not None:
@@ -225,19 +232,64 @@ class ObjectDetector:
         pil_img.save(buffer, format="PNG")
         img_b64 = base64.b64encode(buffer.getvalue()).decode("utf-8")
 
-        prompt = """Detect every individual object in this hand drawn sketch and label it.
+        #prompt = """Detect every individual object in this hand drawn sketch and label it.
 
-Return ONLY a JSON array. Each element must be:
-  {"label": "object/text", "x1": int, "y1": int, "x2": int, "y2": int}
+        # Return ONLY a JSON array. Each element must be:
+        #   {"label": "object/text", "x1": int, "y1": int, "x2": int, "y2": int}
+        # Coordinates are in a 1000x1000 normalized space.
 
-Coordinates are in a 1000x1000 normalized space.
+        # Rules:
+        # - One entry per distinct object instance.
+        # - No explanation, markdown, or text outside the JSON array.
+        # - Keep labels short.
+        # - If the object is a text, label it with is text itself within quotes.
+        # """
+        prompt = """You are an icon and object detector.
 
-Rules:
-- One entry per distinct object instance.
-- No explanation, markdown, or text outside the JSON array.
-- Keep labels short.
-- If the object is a text, label it with is text itself within quotes.
+Look at this image and find every distinct icon, symbol, text, or
+notable object in it.
+
+Respond with ONLY a JSON array (no markdown fences, no commentary). Each
+element must be an object with exactly these fields:
+
+  "label" - a short, human-readable name for the element, written in [[LANGUAGE]].
+            If the element IS text (a word, sentence, sign, caption,
+            heading, etc.), transcribe its actual visible content verbatim
+            as-is (do NOT translate the transcribed text) instead of a
+            generic word like "text" — e.g. use "kitchen" if that is
+            literally what is written. For everything else (icons, symbols,
+            objects), write the label in [[LANGUAGE]].
+            IMPORTANT: handwritten or printed text in the image may be in
+            English or in Dutch (sometimes both in the same image). Expect
+            both languages when reading it, and transcribe each piece of
+            text in the language it is actually written in, whatever the
+            label language above is. Take care to read handwriting
+            carefully and do not "correct" Dutch words into English or
+            vice versa.
+  "is_text" - REQUIRED on every element. true if the element is written text (a word, sentence, sign,
+            caption, heading ...) whose visible content you transcribed in
+            "label"; false for icons, symbols and objects.
+  "x1"    - left edge of its bounding box, normalized to a 0-1000 scale
+            (0 = left edge of the image, 1000 = right edge)
+  "y1"    - top edge of its bounding box, normalized to a 0-1000 scale
+            (0 = top edge of the image, 1000 = bottom edge)
+  "x2"    - right edge of its bounding box, normalized 0-1000 (same scale as x1)
+  "y2"    - bottom edge of its bounding box, normalized 0-1000 (same scale as y1)
+
+Example response:
+[
+  {"label": "[[EXAMPLE_1]]", "is_text": false, "x1": 40, "y1": 78, "x2": 92, "y2": 128},
+  {"label": "Submit", "is_text": true, "x1": 400, "y1": 820, "x2": 520, "y2": 870},
+  {"label": "[[EXAMPLE_2]]", "is_text": false, "x1": 880, "y1": 20, "x2": 945, "y2": 85}
+]
+
+If you find nothing, respond with an empty array: []
+Respond with ONLY the JSON array.
 """
+        lang = self.SUPPORTED_LANGUAGES.get(self.language, "English")
+        ex1, ex2 = self._EXAMPLES.get(self.language, self._EXAMPLES["en"])
+
+        prompt = prompt.replace("[[LANGUAGE]]", lang).replace("[[EXAMPLE_1]]", ex1).replace("[[EXAMPLE_2]]", ex2)
 
         payload = {
             "model": self.params["model_name"],

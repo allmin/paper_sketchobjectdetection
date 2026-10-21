@@ -62,7 +62,8 @@ if __name__ == "__main__":
     pipeline_scene_big_verify = Pipeline([scene_proposal_kde, object_detection_llm_big, object_verification_ensemble_small])
     pipeline_scene_big_verify_ignore_big = Pipeline([scene_proposal_kde, object_detection_llm_big, object_verification_ensemble_small_ignore_big])
 
-    for selected_pipeline in [pipeline_scene_big_verify, pipeline_scene_big_verify_ignore_big, pipeline_small, pipeline_big, pipeline_scene_small, pipeline_scene_big, pipeline_clip]:
+    selected_pipelines = [pipeline_big, pipeline_scene_big]
+    for selected_pipeline in selected_pipelines:
         IMAGE_DIRS = sorted(IMAGE_DIRS)
         for IMAGE_DIR in IMAGE_DIRS:
             if os.path.isdir(IMAGE_DIR):
