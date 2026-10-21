@@ -15,6 +15,20 @@ USE_REAL_DATA = True
 SYNTHETIC_DATA_ROOT = "01_synthetic_data"
 REAL_DATA_ROOT = "01_real_data"
 DATA_ROOT = REAL_DATA_ROOT if USE_REAL_DATA else SYNTHETIC_DATA_ROOT
+
+# ---------------------------------------------------------------------------
+# What the models see:
+#   COLOR = True        -> colour image, CLAHE on the lightness channel only
+#   COLOR = False       -> grayscale + CLAHE (the old behaviour)
+#   RESIZE_WIDTH = None -> original resolution; 1000 = the old behaviour
+# Region proposal still works on a 1000-px-wide copy internally (its parameters
+# were tuned at that size) and its crops are cut from the full image.
+# Non-default settings write to pipeline folders with a suffix such as
+# "_rgb_fullres", so they never mix with the old results.
+# ---------------------------------------------------------------------------
+COLOR = True
+RESIZE_WIDTH = None
+PREPROCESS = dict(color=COLOR, resize_width=RESIZE_WIDTH)
 berlin_path = kagglehub.dataset_download("zara2099/tu-berlin-hand-sketch-image-dataset")
 berlin_path = os.path.join(berlin_path, "TUBerlin", "png_ready")
 files = glob(f"{berlin_path}/*")
@@ -54,13 +68,13 @@ if __name__ == "__main__":
     object_detection_llm_small = ObjectDetector(method="llm", params={"model_name":"gemma4:latest"}, name='icons')
     object_verification_ensemble_small = ObjectVerifier(models=["ministral-3:8b","llava:7b", "moondream:1.8b", "llama3.2-vision:latest", "minicpm-v:8b"], judge = "llama3.1:8b", method="ensemble", name="verify", use_known_label = True)
     object_verification_ensemble_small_ignore_big = ObjectVerifier(models=["ministral-3:8b","llava:7b", "llava:13b","gemma4:e4b", "moondream:1.8b", "llama3.2-vision:latest", "minicpm-v:8b"], judge = "llama3.1:8b", method="ensemble", name="verify_ignore_big", use_known_label = False)
-    pipeline_small = Pipeline([object_detection_llm_small])
-    pipeline_big = Pipeline([object_detection_llm_big])
-    pipeline_scene_small = Pipeline([scene_proposal_kde, object_detection_llm_small])
-    pipeline_scene_big = Pipeline([scene_proposal_kde, object_detection_llm_big])
-    pipeline_clip = Pipeline([scene_proposal_kde, icon_proposal_kde, object_detection_clip])
-    pipeline_scene_big_verify = Pipeline([scene_proposal_kde, object_detection_llm_big, object_verification_ensemble_small])
-    pipeline_scene_big_verify_ignore_big = Pipeline([scene_proposal_kde, object_detection_llm_big, object_verification_ensemble_small_ignore_big])
+    pipeline_small = Pipeline([object_detection_llm_small], **PREPROCESS)
+    pipeline_big = Pipeline([object_detection_llm_big], **PREPROCESS)
+    pipeline_scene_small = Pipeline([scene_proposal_kde, object_detection_llm_small], **PREPROCESS)
+    pipeline_scene_big = Pipeline([scene_proposal_kde, object_detection_llm_big], **PREPROCESS)
+    pipeline_clip = Pipeline([scene_proposal_kde, icon_proposal_kde, object_detection_clip], **PREPROCESS)
+    pipeline_scene_big_verify = Pipeline([scene_proposal_kde, object_detection_llm_big, object_verification_ensemble_small], **PREPROCESS)
+    pipeline_scene_big_verify_ignore_big = Pipeline([scene_proposal_kde, object_detection_llm_big, object_verification_ensemble_small_ignore_big], **PREPROCESS)
 
     selected_pipelines = [pipeline_big, pipeline_scene_big]
     for selected_pipeline in selected_pipelines:

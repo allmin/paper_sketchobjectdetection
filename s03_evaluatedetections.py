@@ -507,8 +507,14 @@ class Evaluator:
             if normalized_box:
                 input_image = self.open_image(gt_path.replace("_gt.json",".png"))
                 width, height = input_image.size
-                denormalize_factor = width/1000
-                pred_df['reconst_bounding_box'] = pred_df['bounding_box'].apply(lambda x: [int(i*denormalize_factor) for i in x])
+                # Predictions are in the frame of the image the pipeline processed. New
+                # results store its size in "image_size"; older ones were always 1000 px wide.
+                def _reconstruct(row):
+                    size = row.get('image_size') if 'image_size' in row else None
+                    pred_width = size[0] if isinstance(size, (list, tuple)) and size else 1000
+                    factor = width / pred_width
+                    return [int(i * factor) for i in row['bounding_box']]
+                pred_df['reconst_bounding_box'] = pred_df.apply(_reconstruct, axis=1) if len(pred_df) else pred_df.get('bounding_box', [])
 
             if len(PRED_DF) == 0:
                 PRED_DF = pred_df

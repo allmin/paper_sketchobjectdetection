@@ -19,9 +19,25 @@ import numpy as np
 from tictoc import tic, toc
 
 class Pipeline:
-    def __init__(self, steps, name=''):
+    def __init__(self, steps, name='', resize_width=None, color=True, proposal_width=1000):
+        """
+        resize_width:   None -> the models see the image at its original resolution.
+                        An int (the old behaviour was 1000) resizes the image to that width first.
+        color:          True -> the models see the colour image; CLAHE is applied to the
+                        lightness channel only. False -> old behaviour: grayscale + CLAHE.
+        proposal_width: region proposal (KDE/DBSCAN) runs, unchanged, on a grayscale+CLAHE
+                        copy at this width, because its pixel parameters were tuned on
+                        1000-px images. The pipeline cuts the matching regions out of the
+                        full-resolution (colour) image for the detectors. None -> no scaling.
+        Results of non-default preprocessing go to pipeline folders with a suffix
+        (e.g. "_rgb_fullres") so they never mix with the old grayscale/1000-px results.
+        """
         self.elapsed_time = {}
         self.steps = steps
+        self.resize_width = resize_width
+        self.color = color
+        self.proposal_width = proposal_width
+        self.preprocess_tag = self._preprocess_tag()
         steps_name = self._obtain_steps_name(self.steps)
         if name:
             self.name = name
@@ -100,14 +116,49 @@ class Pipeline:
             self.elapsed_time[step_type] = toc(t1)
         return 1
     
+    def _preprocess_tag(self):
+        """Folder-name suffix describing non-legacy preprocessing ('' = grayscale, 1000 px)."""
+        tag = ""
+        if self.color:
+            tag += "_rgb"
+        if self.resize_width is None:
+            tag += "_fullres"
+        elif self.resize_width != 1000:
+            tag += f"_w{self.resize_width}"
+        return tag
+
     def _preprocess_image(self, image):
-        image = self._resize_width(image, width=1000)
-        image = self._apply_clahe(image)
+        raw = image
+        image = self._to_rgb_on_white(image) if self.color else image
+        if self.resize_width:
+            image = self._resize_width(image, width=self.resize_width)
+        image = self._apply_clahe_color(image) if self.color else self._apply_clahe(image)
+
+        # Region proposal works on its own copy, made exactly as before
+        # (grayscale + CLAHE at proposal_width), because its pixel parameters were
+        # tuned on that. Its regions are mapped back onto `image` (see _full_crop).
+        work_width = self.proposal_width or image.size[0]
+        if self.color or work_width != image.size[0]:
+            work = self._to_rgb_on_white(raw)
+            self.proposal_image = self._apply_clahe(self._resize_width(work, width=work_width))
+        else:
+            self.proposal_image = image
+        self.proposal_scale = self.proposal_image.size[0] / image.size[0]
         return image
-    
+
+    @staticmethod
+    def _to_rgb_on_white(img):
+        """RGB image; transparent areas (e.g. RGBA PNGs from plt.imsave) become white."""
+        if img.mode in ("RGBA", "LA") or (img.mode == "P" and "transparency" in img.info):
+            img = img.convert("RGBA")
+            background = Image.new("RGBA", img.size, (255, 255, 255, 255))
+            return Image.alpha_composite(background, img).convert("RGB")
+        return img.convert("RGB")
+
+    CLIP_LIMIT = 2.0
+    TILE_GRID_SIZE = (8, 8)
+
     def _apply_clahe(self,img):
-        CLIP_LIMIT = 2.0
-        TILE_GRID_SIZE = (8, 8)
         if img.mode != "L":
             img = img.convert("L")
 
@@ -115,13 +166,20 @@ class Pipeline:
         np_img = np.array(img)
 
         # Create CLAHE object
-        clahe = cv2.createCLAHE(clipLimit=CLIP_LIMIT, tileGridSize=TILE_GRID_SIZE)
+        clahe = cv2.createCLAHE(clipLimit=self.CLIP_LIMIT, tileGridSize=self.TILE_GRID_SIZE)
 
         # Apply CLAHE directly
         cl = clahe.apply(np_img)
 
         # NumPy → PIL
         return Image.fromarray(cl)
+
+    def _apply_clahe_color(self, img):
+        """CLAHE on the lightness channel (CIELAB L) only; colours (a, b) are untouched."""
+        lab = cv2.cvtColor(np.array(img.convert("RGB")), cv2.COLOR_RGB2LAB)
+        clahe = cv2.createCLAHE(clipLimit=self.CLIP_LIMIT, tileGridSize=self.TILE_GRID_SIZE)
+        lab[:, :, 0] = clahe.apply(lab[:, :, 0])
+        return Image.fromarray(cv2.cvtColor(lab, cv2.COLOR_LAB2RGB))
     
     def save_json(self, file_path):
         detections_list = []
@@ -132,6 +190,9 @@ class Pipeline:
             detection_dict["element_type"]= "Icon"
             detection_dict["represents"]= det["label"]
             detection_dict["bounding_box"] = [int(det["x1"]), int(det["y1"]), int(det["x2"]), int(det["y2"])]
+            # Size of the image the boxes refer to (the preprocessed image), so the
+            # evaluator can map boxes onto the ground-truth image at any resolution.
+            detection_dict["image_size"] = list(self.image.size)
             
             if "step_time" in det:
                 detection_dict["step_time"] = det["step_time"]
@@ -227,35 +288,79 @@ class Pipeline:
         self.elapsed_time = data
 
 
+    def _full_crop(self, proposer, sc_id, work_offset):
+        """
+        Cut region `sc_id` found by `proposer` (which ran on the proposal copy) out of
+        the full-resolution model image self.image, keeping only that region's
+        foreground (everything else white, as RegionProposer does).
+        Returns (crop, bbox_in_self_image) or (None, None).
+        """
+        bbox = proposer.cropped_scene_locations[sc_id]
+        if bbox is None or proposer.cropped_scene_images[sc_id] is None:
+            return None, None
+        s = self.proposal_scale
+        x1, y1, x2, y2 = [int(round(v)) for v in bbox]
+        ids = [i + 1 for i, sid in enumerate(proposer.fg_scene_mapping) if sid == sc_id]
+        mask = np.isin(proposer.fg_labels[y1:y2, x1:x2], ids).astype(np.uint8)
+        # Region in proposal-copy coordinates of the whole page -> self.image coordinates
+        gx1, gy1, gx2, gy2 = x1 + work_offset[0], y1 + work_offset[1], x2 + work_offset[0], y2 + work_offset[1]
+        W, H = self.image.size
+        fx1, fy1 = max(0, int(np.floor(gx1 / s))), max(0, int(np.floor(gy1 / s)))
+        fx2, fy2 = min(W, int(np.ceil(gx2 / s))), min(H, int(np.ceil(gy2 / s)))
+        if fx2 <= fx1 or fy2 <= fy1 or mask.size == 0:
+            return None, None
+        patch = np.array(self.image.crop((fx1, fy1, fx2, fy2)))
+        mask = cv2.resize(mask, (fx2 - fx1, fy2 - fy1), interpolation=cv2.INTER_NEAREST)
+        if s < 1:  # slightly grow the upscaled mask so anti-aliased stroke edges are kept
+            k = 2 * int(np.ceil(1.0 / s)) + 1
+            mask = cv2.dilate(mask, np.ones((k, k), np.uint8))
+        patch[~mask.astype(bool)] = 255
+        return Image.fromarray(patch), [fx1, fy1, fx2, fy2]
+
+    def _collect_regions(self, proposer, work_offset):
+        """Proposer results -> (work crops, work locations, full crops, full locations)."""
+        out = ([], [], [], [])
+        for sc_id, (wimg, wbox) in enumerate(zip(proposer.cropped_scene_images, proposer.cropped_scene_locations)):
+            if not (wimg and wbox):
+                continue
+            full_img, full_box = self._full_crop(proposer, sc_id, work_offset)
+            if full_img is None:
+                continue
+            out[0].append(wimg)
+            out[1].append(self._offset_bbox(work_offset, wbox))
+            out[2].append(full_img)
+            out[3].append(full_box)
+        return out
+
     def _run_region_proposal(self):
+        # The proposer always runs on the proposal copy (self.proposal_image and crops of
+        # it, kept in self._work_*); the detectors get the matching full-resolution crops
+        # of self.image (self.cropped_scene_images / self.cropped_scene_locations).
         if len(self.cropped_scene_images)==0:
             print("****Performing first level of region proposal")
-            self.region_proposer.set_image(self.image)
+            self.region_proposer.set_image(self.proposal_image)
             self.region_proposer.run()
-            self.cropped_scene_images.extend(self.region_proposer.cropped_scene_images)
-            self.cropped_scene_locations.extend(self.region_proposer.cropped_scene_locations)
+            (self._work_images, self._work_locations,
+             self.cropped_scene_images, self.cropped_scene_locations) = self._collect_regions(self.region_proposer, (0, 0))
             self.scenes = self.cropped_scene_locations.copy()
         else:
             print("****Performing further level of region proposal")
-            new_cropped_scene_images = []
-            new_cropped_scene_locations = []
-            for img_id, (img, offset) in enumerate(zip(self.cropped_scene_images, self.cropped_scene_locations)):
+            new = ([], [], [], [])
+            for img_id, (img, offset) in enumerate(zip(self._work_images, self._work_locations)):
 
                 if img and offset:
                     self.region_proposer.set_image(img)
                     try:
                         self.region_proposer.run()
-                        for cimage, bbox in zip(self.region_proposer.cropped_scene_images, self.region_proposer.cropped_scene_locations):
-                            if cimage and bbox:
-                                new_cropped_scene_images.append(cimage)
-                                new_cropped_scene_locations.append(self._offset_bbox(offset, bbox))
-                        assert (len(new_cropped_scene_images) == len(new_cropped_scene_locations))
+                        for lst, items in zip(new, self._collect_regions(self.region_proposer, offset)):
+                            lst.extend(items)
+                        assert (len(new[2]) == len(new[3]))
                     except Exception as e:
                         # print(f"Skipping Image of size {img.size} Due to error: {e}")
                         # traceback.print_exc()
                         pass
-            self.cropped_scene_images = new_cropped_scene_images
-            self.cropped_scene_locations = new_cropped_scene_locations
+            (self._work_images, self._work_locations,
+             self.cropped_scene_images, self.cropped_scene_locations) = new
         for img_id, (img, offset) in enumerate(zip(self.cropped_scene_images, self.cropped_scene_locations)):
             if img:
                 os.makedirs(f"{self.result_folder_path}/tmp/{self.file_name}_{self.region_proposer.method}_{self.region_proposer.name}", exist_ok=True)
@@ -310,7 +415,7 @@ class Pipeline:
     def _obtain_steps_name(self, steps):
         get_model_name = lambda x: x.params["model_name"].replace(':','-')
         steps_name = '_'.join([f"{i.method}_{get_model_name(i)}_{i.name}" if (i.method=='llm') else f"{i.method}_{i.name}" for i in steps])
-        return steps_name
+        return steps_name + self.preprocess_tag
     
     def _offset_bbox(self, offset, bbox):
         return [bbox[0]+offset[0], bbox[1]+offset[1], bbox[2]+offset[0], bbox[3]+offset[1]]
