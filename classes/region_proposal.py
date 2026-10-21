@@ -22,10 +22,51 @@ import datetime;
 
 
 
+# App defaults: KDE density slicing followed by region refinement.
+DEFAULT_METHOD = "kde"
+DEFAULT_REFINE = True
+DEFAULT_REFINE_OVERLAP = 0.8
+
+
+def overlap_ratio(a, b):
+    """Share of the smaller box that lies inside the other box:
+    intersection area / area of the smaller box (1.0 = fully contained)."""
+    iw = max(0.0, min(a[2], b[2]) - max(a[0], b[0]))
+    ih = max(0.0, min(a[3], b[3]) - max(a[1], b[1]))
+    smaller = min((a[2] - a[0]) * (a[3] - a[1]), (b[2] - b[0]) * (b[3] - b[1]))
+    if smaller <= 0:
+        return 0.0
+    return iw * ih / smaller
+
+
+def refine_regions(boxes, overlap_threshold):
+    """Region refinement: whenever the overlap ratio of two boxes is larger than
+    `overlap_threshold` they are replaced by their union; the scan restarts from
+    the beginning until no pair can be merged any more."""
+    boxes = [list(map(float, b)) for b in boxes]
+    merged = True
+    while merged:
+        merged = False
+        for i in range(len(boxes)):
+            for j in range(i + 1, len(boxes)):
+                if overlap_ratio(boxes[i], boxes[j]) > overlap_threshold:
+                    a, b = boxes[i], boxes[j]
+                    boxes[i] = [min(a[0], b[0]), min(a[1], b[1]), max(a[2], b[2]), max(a[3], b[3])]
+                    del boxes[j]
+                    merged = True
+                    break
+            if merged:
+                break
+    return boxes
+
+
 class RegionProposer:
-    def __init__(self, method, params={}, name=""):
+    def __init__(self, method=DEFAULT_METHOD, params=None, name="",
+                 refine=DEFAULT_REFINE, refine_overlap=DEFAULT_REFINE_OVERLAP):
         self.method = method
-        self.params = params
+        self.params = dict(params) if params else {}   # copy: never mutate caller's dict
+        self.refine = refine
+        self.refine_overlap = refine_overlap
         self.expected_input = np.ndarray
         self.output_type = dict
         self.output = {}
@@ -67,13 +108,14 @@ class RegionProposer:
             self.clusters = find_clusters(self.fg_points, method="dbscan", params=self.params)
             print(len(self.clusters))
             self.scene_bboxes = self._scene_bboxes_from_clusters()   # ← was _centroid_to_box
+            self._refine_scene_bboxes()
             self._match_and_expand_bboxes()
             
             print("Completed region proposal")
             
         elif self.method.lower() == "kde":
             self.param_specs = {"kde_thresh":{"description":"the level at which the normalised kde maps need to be sliced",
-                                                "min":0, "max":1, "recommended":0.5},
+                                                "min":0, "max":1, "recommended":0.3},
                                 "bandwidth_method":{"description":"The method used to calculate the estimator bandwidth.",
                                                 "min":"scott", "max":"scott", "recommended":"scott"},
                                 "grid_resolution":{"description":"resolution of the KDE. higher=slower but better spatial resolution.",
@@ -85,6 +127,7 @@ class RegionProposer:
             self._compute_kde_density()
             self._threshold_density()
             self.scene_bboxes = self._extract_scene_bboxes()
+            self._refine_scene_bboxes()
             self._match_and_expand_bboxes()
             print("finish")
     
@@ -102,6 +145,11 @@ class RegionProposer:
             xs, ys = relevant_points[:,0], relevant_points[:,1]
             scene_bboxes.append([xs.min(), ys.min(), xs.max(), ys.max()])
         return scene_bboxes
+
+    def _refine_scene_bboxes(self):
+        """Region refinement stage (on by default; disable with refine=False)."""
+        if self.refine and self.scene_bboxes:
+            self.scene_bboxes = refine_regions(self.scene_bboxes, self.refine_overlap)
 
     def _apply_default_parameters(self):
         for (param,info) in self.param_specs.items():
@@ -193,6 +241,8 @@ class RegionProposer:
     
     def _extract_scene_bboxes(self):
         grid_res = self.params["grid_resolution"]
+        if self.kde_mask is None:   # flat density: one scene covering all ink
+            return [list(self.xyrange)]
         num_labels, labels, stats, _ = connected_components(self.kde_mask)
         scene_bboxes = cc2bbox(stats, grid_res, self.xyrange)
         return scene_bboxes
@@ -204,7 +254,7 @@ class RegionProposer:
 
 if __name__ == "__main__":
     image = Image.open("test_data/realdata/SampleRP.png")
-    rp = RegionProposer(method="dbscan", params={"epsilon":20, "min_sample":1})
+    rp = RegionProposer()   # KDE (kde_thresh 0.3) + region refinement (overlap 0.8)
     rp.set_image(image)
     rp.run()
     rp._save_img_array(rp.cropped_scene_images ,tag='edgebased')
