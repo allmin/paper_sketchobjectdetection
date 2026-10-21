@@ -16,6 +16,19 @@ import json
 import os
 from PIL import Image, ImageDraw, ImageFont
 
+# ---------------------------------------------------------------------------
+# Which data to evaluate. Change as you wish:
+#   True  -> real rich pictures: ground truth in 01_real_data/<folder>/*_gt.json
+#            (made by s01b_prepare_real_data.py), results in 03_evaluation_real/
+#   False -> synthetic data in 01_synthetic_data/, results in 03_evaluation/
+# ---------------------------------------------------------------------------
+USE_REAL_DATA = True
+SYNTHETIC_DATA_ROOT = "01_synthetic_data"
+REAL_DATA_ROOT = "01_real_data"
+DETECTIONS_ROOT = "02_detected_picture_elements"
+DATA_ROOT = REAL_DATA_ROOT if USE_REAL_DATA else SYNTHETIC_DATA_ROOT
+EVALUATION_ROOT = "03_evaluation_real" if USE_REAL_DATA else "03_evaluation"
+
 @lru_cache(maxsize=300)
 def _open_image_cached(path):
     return Image.open(path)
@@ -219,7 +232,10 @@ class Evaluator:
 
     def get_info(self, element_path):
         elements = json.load(open(element_path))
-        sample = [i for i in elements if i['element_type']=='Icon'][0]
+        icons = [i for i in elements if i['element_type']=='Icon']
+        if not icons:  # e.g. a real image on which a pipeline detected nothing
+            return pd.DataFrame({key: [] for key in ["represents", "bounding_box", "element_type"]})
+        sample = icons[0]
         out_dict = {key:[] for key in sample.keys()}
         for element in elements:
             for key in out_dict.keys():
@@ -310,14 +326,10 @@ class Evaluator:
 
     
     def get_pred_path(self, pipeline_name, fname):
-        pred_path1 = os.path.join(
-                data_dir.replace("01_synthetic_data", f"02_detected_picture_elements/{pipeline_name}"),
-                fname.replace("gt", "detected")
-        )
-        pred_path2 = os.path.join(
-            data_dir.replace("01_synthetic_data", f"02_detected_picture_elements/{pipeline_name}"),
-            fname.replace("_gt", "")
-        )
+        # s02 writes predictions to 02_detected_picture_elements/<pipeline>/<folder>/
+        pred_dir = os.path.join(DETECTIONS_ROOT, pipeline_name, os.path.basename(os.path.normpath(self.data_dir)))
+        pred_path1 = os.path.join(pred_dir, fname.replace("_gt.json", "_detected.json"))
+        pred_path2 = os.path.join(pred_dir, fname.replace("_gt", ""))
         pred_path = pred_path1 if os.path.exists(pred_path1) else pred_path2
         return pred_path
 
@@ -370,19 +382,17 @@ class Evaluator:
 
             for metric in ['precision', 'recall']:
                 summary_dict["metric"].append(f"{prefix}considering bbox mean. {metric}")
-                summary_dict["value"].append(df[metric].mean())
+                # -1 marks an undefined per-image value (precision with no predictions,
+                # recall with no ground truth); leave those images out of the mean.
+                valid = df[metric][df[metric] >= 0]
+                summary_dict["value"].append(valid.mean() if len(valid) else -1)
             #----
+            tp_sum, fp_sum, fn_sum = df['tp'].sum(), df['fp'].sum(), df['fn'].sum()
             summary_dict["metric"].append(f"{prefix}considering bbox dataset precision") 
-            try:
-                summary_dict["value"].append(df['tp'].sum()/(df['tp'].sum()+df['fp'].sum()))
-            except:
-                summary_dict["value"].append(-1)
+            summary_dict["value"].append(tp_sum / (tp_sum + fp_sum) if (tp_sum + fp_sum) > 0 else -1)
             #----
             summary_dict["metric"].append(f"{prefix}considering bbox dataset recall")
-            try:
-                summary_dict["value"].append(df['tp'].sum()/(df['tp'].sum()+df['fn'].sum()))
-            except:
-                summary_dict["value"].append(-1)
+            summary_dict["value"].append(tp_sum / (tp_sum + fn_sum) if (tp_sum + fn_sum) > 0 else -1)
 
             # summary_dict["metric"].append("")
             # summary_dict["value"].append(len(df['']))
@@ -443,7 +453,10 @@ class Evaluator:
     def evaluate(self, data_dir, pipeline_name, ref_path, target_element_type = 'Icon', normalized_box=False,):
         global SUPER_SUMMARY
         self.pipeline = pipeline_name
-        self.out_mega_folder = f"03_evaluation/{pipeline_name}"
+        self.data_dir = data_dir
+        self.out_mega_folder = f"{EVALUATION_ROOT}/{pipeline_name}"
+        if USE_REAL_DATA:  # one result set per real-data folder, so folders don't overwrite each other
+            self.out_mega_folder = f"{EVALUATION_ROOT}/{pipeline_name}/{os.path.basename(os.path.normpath(data_dir))}"
         result_dict = {}
         result_df = {}
         tp_dfs = {True:[], False:[]}
@@ -453,11 +466,13 @@ class Evaluator:
         PRED_DF = pd.DataFrame()
         
         json_files = sorted([f for f in os.listdir(data_dir) if f.endswith(".json")])
+        evaluated_any = False
 
-        ref_files = glob(ref_path)
-        json_ref_files = [os.path.basename(full_path).rstrip('_detected.json') for full_path in ref_files]
-
-        json_files = [i for i in json_files if any([j in i for j in json_ref_files])]
+        json_files = [f for f in json_files if f.endswith("_gt.json")]
+        if ref_path:  # optionally restrict to images that also exist in a reference pipeline
+            ref_files = glob(ref_path)
+            json_ref_files = [os.path.basename(full_path)[:-len('_detected.json')] for full_path in ref_files]
+            json_files = [i for i in json_files if i[:-len('_gt.json')] in json_ref_files]
 
         for fname in tqdm(json_files):
             if (not fname.endswith(".json")) or ("data_summary" in fname):
@@ -473,6 +488,7 @@ class Evaluator:
             if not os.path.exists(pred_path):
                 print(f"Missing predictions for {base}, skipping {pred_path}")
                 continue
+            evaluated_any = True
             
             id = f"{data_dir}/{fname}"
             
@@ -529,6 +545,10 @@ class Evaluator:
                 fp_dfs[consider_proximity].append(fp_df)
                 fn_dfs[consider_proximity].append(fn_df)
         
+
+        if not evaluated_any:
+            print(f"No ground-truth/prediction pairs for pipeline {pipeline_name} in {data_dir}, skipping")
+            return None, None
 
         ##### calculating mAP-x
 
@@ -627,13 +647,25 @@ class Evaluator:
 
 if __name__ == "__main__":
     TEST = True
-    DATA_DIRS = [p for p in glob("01_synthetic_data/*") if os.path.isdir(p)]
+    DATA_DIRS = [p for p in glob(f"{DATA_ROOT}/*") if os.path.isdir(p)]
     PIPELINES = ["kde_scene_kde_icon_clip_icons","llm_gemma4-latest_icons","llm_gemma4-31b_icons","kde_scene_llm_gemma4-latest_icons","kde_scene_llm_gemma4-31b_icons","kde_scene_llm_gemma4-31b_icons_ensemble_verify"]
     METRICS = ['iou-10','iou-20','iou-30','iou-40','iou-50','iou-60','iou-70','iou-80','iou-90','centerdist-100', 'centerdist-200', 'centerdist-400', 'centerdist-600', 'centerdist-800']
     SEM_THRESHS = [0.1, 0.2, 0.3, 0.4, 0.5,0.6,0.7,0.8,0.9]
     SUPER_SUMMARY = pd.DataFrame()
     SIMILARITY_CACHE = None    
     REF_PATH = "/home/P103236/projects/paper_sketchobjectdetection/02_detected_picture_elements/kde_scene_llm_gemma4-31b_icons_ensemble_verify/02_to_05_clusters_05_to_20_classes_03_to_05_images_per_class_20_minimum_icons_00_to_00_percent_overlap_00_minimum_overlap_images_3.0_max_scaling_factor/image_*_detected.json"
+
+    if USE_REAL_DATA:
+        # Evaluate every pipeline that s02 has produced predictions for on the real data
+        REF_PATH = None
+        TEST = False
+        real_folders = [os.path.basename(d) for d in DATA_DIRS]
+        PIPELINES = sorted(p for p in os.listdir(DETECTIONS_ROOT)
+                           if any(os.path.isdir(os.path.join(DETECTIONS_ROOT, p, f)) for f in real_folders)) \
+                    if os.path.isdir(DETECTIONS_ROOT) else []
+        print(f"Real data: {len(DATA_DIRS)} folder(s), pipelines found: {PIPELINES}")
+        METRICS = ['iou-30']
+        SEM_THRESHS = [0.375]
 
     if TEST:
         PIPELINES = []#["kde_scene_kde_icon_clip_icons","llm_gemma4-latest_icons","llm_gemma4-31b_icons","kde_scene_llm_gemma4-latest_icons","kde_scene_llm_gemma4-31b_icons","kde_scene_llm_gemma4-31b_icons_ensemble_verify","kde_scene_llm_gemma4-31b_icons_ensemble_verify_w_majority","kde_scene_llm_gemma4-31b_icons_ensemble_verify_ignore_big"]
@@ -656,6 +688,8 @@ if __name__ == "__main__":
                     print(f"evaluating pipeline {pipeline} | {METRIC} | {SEM_THRESH}")
                     for data_dir in DATA_DIRS:
                         summary_df, similarity_cache = evaluator.evaluate(data_dir, pipeline_name=pipeline, ref_path=REF_PATH, normalized_box = True, target_element_type=target_element)
+                        if summary_df is None:
+                            continue
                         if 'metric' not in SUPER_SUMMARY.columns:
                             SUPER_SUMMARY['metric'] = summary_df['metric'].copy().reset_index(drop=True)
                         if run_once:
@@ -664,11 +698,16 @@ if __name__ == "__main__":
                             else:
                                 SIMILARITY_CACHE = pd.concat([SIMILARITY_CACHE, similarity_cache])
                         row_index = f'{pipeline}_{target_element}|{METRIC}|{SEM_THRESH}'
+                        if USE_REAL_DATA:
+                            row_index += f'|{os.path.basename(data_dir)}'
                         summary_df[row_index] = summary_df['value']
                         SUPER_SUMMARY = pd.concat([SUPER_SUMMARY, summary_df[row_index].reset_index(drop=True)], axis = 1)
                         print("Evaluation complete\n")
                 run_once = False
+    if SUPER_SUMMARY.empty:
+        raise SystemExit(f"Nothing was evaluated: check {DATA_ROOT}/ and {DETECTIONS_ROOT}/")
+    os.makedirs(EVALUATION_ROOT, exist_ok=True)
     SUPER_SUMMARY = SUPER_SUMMARY.set_index("metric").T.rename_axis("pipeline").reset_index()
-    SUPER_SUMMARY.to_excel(f'03_evaluation/super_summary.xlsx', index=False)
+    SUPER_SUMMARY.to_excel(f'{EVALUATION_ROOT}/super_summary.xlsx', index=False)
     SIMILARITY_CACHE = SIMILARITY_CACHE.drop_duplicates(['text1','text2'])
-    SIMILARITY_CACHE.to_excel(f'03_evaluation/similarity_cache.xlsx', index=False)
+    SIMILARITY_CACHE.to_excel(f'{EVALUATION_ROOT}/similarity_cache.xlsx', index=False)
