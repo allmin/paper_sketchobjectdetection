@@ -654,7 +654,8 @@ class Evaluator:
 if __name__ == "__main__":
     TEST = True
     DATA_DIRS = [p for p in glob(f"{DATA_ROOT}/*") if os.path.isdir(p)]
-    PIPELINES = ["kde_scene_kde_icon_clip_icons","llm_gemma4-latest_icons","llm_gemma4-31b_icons","kde_scene_llm_gemma4-latest_icons","kde_scene_llm_gemma4-31b_icons","kde_scene_llm_gemma4-31b_icons_ensemble_verify"]
+    # PIPELINES = ["kde_scene_kde_icon_clip_icons","llm_gemma4-latest_icons","llm_gemma4-31b_icons","kde_scene_llm_gemma4-latest_icons","kde_scene_llm_gemma4-31b_icons","kde_scene_llm_gemma4-31b_icons_ensemble_verify"]
+    PIPELINES = ["llm_gemma4-31b_icons","kde_scene_llm_gemma4-31b_icons"]
     METRICS = ['iou-10','iou-20','iou-30','iou-40','iou-50','iou-60','iou-70','iou-80','iou-90','centerdist-100', 'centerdist-200', 'centerdist-400', 'centerdist-600', 'centerdist-800']
     SEM_THRESHS = [0.1, 0.2, 0.3, 0.4, 0.5,0.6,0.7,0.8,0.9]
     SUPER_SUMMARY = pd.DataFrame()
