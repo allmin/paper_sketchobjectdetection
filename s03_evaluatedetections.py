@@ -12,6 +12,8 @@ from torch import tensor
 import torch
 from tqdm import tqdm
 from torchmetrics.detection import MeanAveragePrecision
+from scipy.optimize import linear_sum_assignment
+import numpy as np
 import json
 import os
 from PIL import Image, ImageDraw, ImageFont
@@ -28,6 +30,21 @@ REAL_DATA_ROOT = "01_real_data"
 DETECTIONS_ROOT = "02_detected_picture_elements"
 DATA_ROOT = REAL_DATA_ROOT if USE_REAL_DATA else SYNTHETIC_DATA_ROOT
 EVALUATION_ROOT = "03_evaluation_real" if USE_REAL_DATA else "03_evaluation"
+
+# ---------------------------------------------------------------------------
+# How predictions are paired with ground truth (one-to-one in both cases):
+#   "hungarian" -> optimal bipartite matching (scipy linear_sum_assignment). Only pairs
+#                  that pass the thresholds (element type, semantic similarity, and
+#                  IoU / centre distance when the bbox is considered) may match. Among
+#                  those it maximises the NUMBER of matches first and then the total
+#                  match weight:
+#                      weight = SEMANTIC_WEIGHT * semantic_similarity
+#                             + (1 - SEMANTIC_WEIGHT) * IoU
+#                  so the result does not depend on the order of the predictions.
+#   "greedy"    -> the original first-fit matching, in prediction order.
+# ---------------------------------------------------------------------------
+MATCHING_METHOD = "hungarian"
+SEMANTIC_WEIGHT = 0.5
 
 @lru_cache(maxsize=300)
 def _open_image_cached(path):
@@ -135,7 +152,12 @@ class SemanticLabelMapper:
 class Evaluator:
     cache_export = {}
     semantic_model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
-    def __init__(self, proximity_metric='iou', semantic_threshold=0.5, semantic_model_name="sentence-transformers/all-MiniLM-L6-v2", normalized_box=True, run_once=True):
+    def __init__(self, proximity_metric='iou', semantic_threshold=0.5, semantic_model_name="sentence-transformers/all-MiniLM-L6-v2", normalized_box=True, run_once=True,
+                 matching=None, semantic_weight=None):
+        self.matching = (matching or MATCHING_METHOD).lower()
+        if self.matching not in ("hungarian", "greedy"):
+            raise ValueError(f"Unknown matching method: {self.matching}")
+        self.semantic_weight = SEMANTIC_WEIGHT if semantic_weight is None else semantic_weight
         self.proximity_metric = proximity_metric
         proximity_threshold_dict = {'iou-10': 0.1,'iou-20': 0.2,'iou-30': 0.3,'iou-40': 0.4,'iou-50': 0.5,
                                     'iou-60': 0.6,'iou-70': 0.7,'iou-80': 0.8,'iou-90': 0.9,
@@ -334,6 +356,68 @@ class Evaluator:
         return pred_path
 
     def get_matchings(self, pred_df, gt_df, consider_proximity):
+        if self.matching == "hungarian":
+            return self.get_matchings_hungarian(pred_df, gt_df, consider_proximity)
+        return self.get_matchings_greedy(pred_df, gt_df, consider_proximity)
+
+    def match_weight(self, rowA, rowB):
+        """Weight of a (prediction, ground truth) pair:
+        SEMANTIC_WEIGHT * semantic similarity + (1 - SEMANTIC_WEIGHT) * IoU.
+        Returns (weight, semantic_similarity, iou)."""
+        boxA = rowA["reconst_bounding_box"] if self.normalized_box else rowA['bounding_box']
+        boxB = rowB["bounding_box"]
+        if rowA['element_type'] == 'Icon':
+            _, sem = self.are_semantically_similar(rowA["represents"], rowB["represents"], threshold=self.semantic_threshold)
+        else:
+            sem = 1.0  # scenes are not compared by label
+        overlap = self.iou(boxA, boxB)
+        weight = self.semantic_weight * sem + (1 - self.semantic_weight) * overlap
+        return weight, sem, overlap
+
+    def get_matchings_hungarian(self, pred_df, gt_df, consider_proximity):
+        """One-to-one optimal matching (Hungarian algorithm) on the match weights."""
+        gt_df['gt_represents'] = gt_df['represents'].copy()
+        preds = list(pred_df.iterrows())
+        gts = list(gt_df.iterrows())
+        n_p, n_g = len(preds), len(gts)
+
+        # Allowed pairs get cost -(BIG + weight): every extra match outweighs any gain
+        # in weight, so the number of matches is maximised first, the weight second.
+        # Pairs that fail a threshold get cost 0 and are dropped if assigned.
+        BIG = 1000.0
+        cost = np.zeros((n_p, n_g))
+        allowed = np.zeros((n_p, n_g), dtype=bool)
+        details = {}
+        for i, (_, pred_row) in enumerate(preds):
+            for j, (_, gt_row) in enumerate(gts):
+                if self.is_element_match(pred_row, gt_row, consider_proximity):
+                    weight, sem, overlap = self.match_weight(pred_row, gt_row)
+                    allowed[i, j] = True
+                    cost[i, j] = -(BIG + weight)
+                    details[(i, j)] = (weight, sem, overlap)
+
+        matched_pred, matched_gt, tp = set(), set(), []
+        if n_p and n_g and allowed.any():
+            rows, cols = linear_sum_assignment(cost)
+            for i, j in zip(rows, cols):
+                if not allowed[i, j]:
+                    continue
+                pred_row, gt_row = preds[i][1], gts[j][1]
+                merged = pd.concat([pred_row, gt_row.drop(labels=['represents'])], axis=0)
+                weight, sem, overlap = details[(i, j)]
+                merged["match_weight"], merged["match_semantic"], merged["match_iou"] = weight, sem, overlap
+                tp.append(merged.to_frame().T)
+                matched_pred.add(i)
+                matched_gt.add(j)
+
+        fp = [row.to_frame().T for i, (_, row) in enumerate(preds) if i not in matched_pred and row['represents']]
+        fn = [row.to_frame().T for j, (_, row) in enumerate(gts) if j not in matched_gt]
+        tp_df = pd.concat(tp, ignore_index=True) if len(tp)>0 else pd.DataFrame()
+        fp_df = pd.concat(fp, ignore_index=True) if len(fp)>0 else pd.DataFrame()
+        fn_df = pd.concat(fn, ignore_index=True) if len(fn)>0 else pd.DataFrame()
+        return tp_df, fp_df, fn_df
+
+    def get_matchings_greedy(self, pred_df, gt_df, consider_proximity):
         tp, fp, fn = [], [], []
         gt_matched = []
         gt_df['gt_represents'] = gt_df['represents'].copy()
@@ -526,7 +610,7 @@ class Evaluator:
             for consider_proximity in [True, False]:
                 tp_df,fp_df,fn_df = self.get_matchings(pred_df, gt_df, consider_proximity=consider_proximity)
 
-                vis_out_folder = f"{self.out_mega_folder}/annotated_images/{'with_bbox' if consider_proximity else 'no_bbox'}"
+                vis_out_folder = f"{self.out_mega_folder}/annotated_images{'' if self.matching == 'greedy' else '_' + self.matching}/{'with_bbox' if consider_proximity else 'no_bbox'}"
                 os.makedirs(vis_out_folder, exist_ok=True)
                 image_path = gt_path.replace("_gt.json", ".png")
                 save_path = f"{vis_out_folder}/{fname.replace('.json', '')}.png"
@@ -600,7 +684,8 @@ class Evaluator:
         for consider_proximity in [True, False]:
             result_df[consider_proximity] = pd.DataFrame(result_dict[consider_proximity])
         
-        out_folder = f"{self.out_mega_folder}/{self.proximity_metric}_sim-{self.semantic_threshold}/{target_element_type}"
+        matching_tag = "" if self.matching == "greedy" else f"_{self.matching}"
+        out_folder = f"{self.out_mega_folder}/{self.proximity_metric}_sim-{self.semantic_threshold}{matching_tag}/{target_element_type}"
         os.makedirs(out_folder, exist_ok=True)
         out_path = f"{out_folder}/results.xlsx"
         
@@ -663,14 +748,14 @@ if __name__ == "__main__":
     REF_PATH = "/home/P103236/projects/paper_sketchobjectdetection/02_detected_picture_elements/kde_scene_llm_gemma4-31b_icons_ensemble_verify/02_to_05_clusters_05_to_20_classes_03_to_05_images_per_class_20_minimum_icons_00_to_00_percent_overlap_00_minimum_overlap_images_3.0_max_scaling_factor/image_*_detected.json"
 
     if USE_REAL_DATA:
-        # Evaluate every pipeline that s02 has produced predictions for on the real data
+        # Evaluate the pipelines listed in PIPELINES above on the real data
         REF_PATH = None
         TEST = False
         real_folders = [os.path.basename(d) for d in DATA_DIRS]
-        PIPELINES = sorted(p for p in os.listdir(DETECTIONS_ROOT)
-                           if any(os.path.isdir(os.path.join(DETECTIONS_ROOT, p, f)) for f in real_folders)) \
-                    if os.path.isdir(DETECTIONS_ROOT) else []
-        print(f"Real data: {len(DATA_DIRS)} folder(s), pipelines found: {PIPELINES}")
+        print(f"Real data: {len(DATA_DIRS)} folder(s), pipelines: {PIPELINES}")
+        for p in PIPELINES:
+            if not any(os.path.isdir(os.path.join(DETECTIONS_ROOT, p, f)) for f in real_folders):
+                print(f"WARNING: no predictions for pipeline '{p}' in {DETECTIONS_ROOT}/{p}/<{'|'.join(real_folders)}> - it will be skipped")
         METRICS = ['iou-30']
         SEM_THRESHS = [0.375]
 
@@ -704,7 +789,7 @@ if __name__ == "__main__":
                                 SIMILARITY_CACHE = similarity_cache
                             else:
                                 SIMILARITY_CACHE = pd.concat([SIMILARITY_CACHE, similarity_cache])
-                        row_index = f'{pipeline}_{target_element}|{METRIC}|{SEM_THRESH}'
+                        row_index = f'{pipeline}_{target_element}|{METRIC}|{SEM_THRESH}|{evaluator.matching}'
                         if USE_REAL_DATA:
                             row_index += f'|{os.path.basename(data_dir)}'
                         summary_df[row_index] = summary_df['value']
