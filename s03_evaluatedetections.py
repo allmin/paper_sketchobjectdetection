@@ -1,22 +1,19 @@
-import os
 import json
-from glob import glob
-from PIL import Image
-import pandas as pd
-from sentence_transformers import SentenceTransformer, util
-from tqdm import tqdm
-from functools import lru_cache
-from sentence_transformers import util
 import math
-from torch import tensor
-import torch
-from tqdm import tqdm
-from torchmetrics.detection import MeanAveragePrecision
-from scipy.optimize import linear_sum_assignment
-import numpy as np
-import json
 import os
-from PIL import Image, ImageDraw, ImageFont
+from functools import lru_cache
+from glob import glob
+
+import numpy as np
+import pandas as pd
+import torch
+from PIL import Image, ImageDraw
+from scipy.optimize import linear_sum_assignment
+from sentence_transformers import SentenceTransformer, util
+from torch import tensor
+from torchmetrics.detection import MeanAveragePrecision
+from torchvision.ops import box_iou
+from tqdm import tqdm
 
 # ---------------------------------------------------------------------------
 # Which data to evaluate. Change as you wish:
@@ -39,8 +36,10 @@ EVALUATION_ROOT = "03_evaluation_real" if USE_REAL_DATA else "03_evaluation"
 #                  those it maximises the NUMBER of matches first and then the total
 #                  match weight:
 #                      weight = SEMANTIC_WEIGHT * semantic_similarity
-#                             + (1 - SEMANTIC_WEIGHT) * IoU
-#                  so the result does not depend on the order of the predictions.
+#                             + (1 - SEMANTIC_WEIGHT) * box_proximity
+#                  where box_proximity is the IoU for 'iou*' metrics and
+#                  1 - distance / threshold (clipped to 0..1) for 'centerdist*' metrics.
+#                  The result does not depend on the order of the predictions.
 #   "greedy"    -> the original first-fit matching, in prediction order.
 # ---------------------------------------------------------------------------
 MATCHING_METHOD = "hungarian"
@@ -50,8 +49,6 @@ SEMANTIC_WEIGHT = 0.5
 def _open_image_cached(path):
     return Image.open(path)
 
-import torch
-from torchvision.ops import box_iou
 
 class CustomAREvaluator:
     def __init__(self, iou_thresholds=[0.30, 0.40, 0.50, 0.60, 0.70], max_dets=[30, 40, 50, 60, 70]):
@@ -361,8 +358,10 @@ class Evaluator:
         return self.get_matchings_greedy(pred_df, gt_df, consider_proximity)
 
     def match_weight(self, rowA, rowB):
-        """Weight of a (prediction, ground truth) pair:
-        SEMANTIC_WEIGHT * semantic similarity + (1 - SEMANTIC_WEIGHT) * IoU.
+        """Weight of a (prediction, ground truth) pair, in 0..1:
+        SEMANTIC_WEIGHT * semantic similarity + (1 - SEMANTIC_WEIGHT) * box proximity.
+        Box proximity is the IoU for 'iou*' metrics, and for 'centerdist*' metrics
+        1 - distance / threshold clipped to 0..1 (closer centres -> higher).
         Returns (weight, semantic_similarity, iou)."""
         boxA = rowA["reconst_bounding_box"] if self.normalized_box else rowA['bounding_box']
         boxB = rowB["bounding_box"]
@@ -371,20 +370,35 @@ class Evaluator:
         else:
             sem = 1.0  # scenes are not compared by label
         overlap = self.iou(boxA, boxB)
-        weight = self.semantic_weight * sem + (1 - self.semantic_weight) * overlap
+        if self.proximity_metric.startswith('center') and self.proximity_threshold > 0:
+            dist = Evaluator.centerdist(tuple(boxA), tuple(boxB))
+            proximity = min(1.0, max(0.0, 1.0 - dist / self.proximity_threshold))
+        else:
+            proximity = overlap
+        weight = self.semantic_weight * sem + (1 - self.semantic_weight) * proximity
         return weight, sem, overlap
 
     def get_matchings_hungarian(self, pred_df, gt_df, consider_proximity):
-        """One-to-one optimal matching (Hungarian algorithm) on the match weights."""
+        """
+        One-to-one optimal matching (Hungarian algorithm).
+
+        1. Gate: a (prediction, GT) pair is a candidate only if is_element_match()
+           accepts it, i.e. same element type, semantic similarity >= semantic_threshold
+           and (when consider_proximity) IoU >= threshold / centre distance < threshold.
+        2. Assign: linear_sum_assignment over the candidates maximises the number of
+           matches first and, among equally many, the summed match_weight().
+        Non-candidate pairs can never become true positives.
+        """
         gt_df['gt_represents'] = gt_df['represents'].copy()
         preds = list(pred_df.iterrows())
         gts = list(gt_df.iterrows())
         n_p, n_g = len(preds), len(gts)
 
-        # Allowed pairs get cost -(BIG + weight): every extra match outweighs any gain
-        # in weight, so the number of matches is maximised first, the weight second.
+        # Allowed pairs get cost -(BIG + weight) with weight in 0..1. BIG exceeds the
+        # largest possible total weight (min(n_p, n_g)), so one extra match always
+        # beats any gain in weight: matches are maximised first, the weight second.
         # Pairs that fail a threshold get cost 0 and are dropped if assigned.
-        BIG = 1000.0
+        BIG = float(min(n_p, n_g) + 1)
         cost = np.zeros((n_p, n_g))
         allowed = np.zeros((n_p, n_g), dtype=bool)
         details = {}

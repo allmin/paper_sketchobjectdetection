@@ -1,26 +1,61 @@
-from ast import main
+import json
+import math
+import os
+import random
+from dataclasses import dataclass
+from itertools import combinations, product
 
 import cv2
 import kagglehub
-import os
-import random
-import numpy as np
 import matplotlib.image as mpimg
-import json
-from torch import classes
-from itertools import product
-from scipy.ndimage import binary_fill_holes
-from dataclasses import dataclass, field
-import math
-import os
-import pandas as pd
 import matplotlib.pyplot as plt
-import math
-from itertools import combinations
+import numpy as np
+import pandas as pd
+from scipy.ndimage import binary_fill_holes
 
 # setting random seed for reproducibility
 random.seed(42)
 np.random.seed(42)
+
+# Separate seed for choosing overlap levels, so adding/removing levels does not
+# change which icons, classes and positions the main random stream produces.
+OVERLAP_LEVEL_SEED = 2024
+
+
+def _fmt_pct(value):
+    """Format an overlap percentage for labels/folder names: 5 -> '05', 2.5 -> '2.5'."""
+    return f"{int(value):02d}" if float(value).is_integer() else f"{value:g}"
+
+
+def make_overlap_levels(overlap_ranges, min_num_overlap_images):
+    """
+    Turn a list of (min %, max %) overlap ranges into level dicts used during placement.
+
+    Each level carries its own min_num_overlap_images; it is forced to 0 for a
+    zero-overlap level (as the original single-level code did).
+    """
+    if len(overlap_ranges) == 0:
+        raise ValueError("At least one overlap range is required")
+    levels = []
+    for low, high in overlap_ranges:
+        if high < low:
+            raise ValueError(f"Overlap range ({low}, {high}): max is smaller than min")
+        levels.append(
+            {
+                "min": low,
+                "max": high,
+                "min_num": 0 if high == 0 else min_num_overlap_images,
+                "label": f"{_fmt_pct(low)}-{_fmt_pct(high)}",
+            }
+        )
+    return levels
+
+
+def balanced_level_assignment(n, levels, rng):
+    """Assign n items to levels so each level is used equally often (+-1), in random order."""
+    assigned = [levels[i % len(levels)] for i in range(n)]
+    rng.shuffle(assigned)
+    return assigned
 
 
 def get_dataset_path():
@@ -399,8 +434,20 @@ class MultiIconDataset:
         self,
         icon_meta,
         existing_bbox_list,
-        Config,
+        level,
     ):
+        """
+        Find a paste location for one icon.
+
+        `level` is the overlap level (see make_overlap_levels) that applies to this
+        icon's image or cluster: min/max overlap in percent and min_num, the number
+        of icons already in the cluster before the max-overlap limit is enforced.
+        Overlap is only measured against icons in the same cluster, and with
+        per-cluster levels all icons of a cluster share the same level.
+        """
+        min_overlap = level["min"]
+        max_overlap = level["max"]
+        min_num_overlap_images = level["min_num"]
         icon_height, icon_width = icon_meta["image"].shape[:2]
         icon_cluster_center = icon_meta["cluster_center"]
         skip_icon = False
@@ -439,21 +486,21 @@ class MultiIconDataset:
             if (
                 self.is_icon_within_canvas(icon_bounding_box)
                 and (
-                    overlap_percent <= Config.max_overlap_of_images
-                    if len(existing_bbox_list_sel) > Config.min_num_overlap_images
+                    overlap_percent <= max_overlap
+                    if len(existing_bbox_list_sel) > min_num_overlap_images
                     else True
                 )
                 and (
                     all(
                         [
-                            after_merge_overlap < Config.max_overlap_of_images
+                            after_merge_overlap < max_overlap
                             for (_, _, _, after_merge_overlap) in overlap_info
                         ]
                     )
                 )
             ):
                 if (
-                    overlap_percent >= Config.min_overlap_of_images
+                    overlap_percent >= min_overlap
                     if (len(existing_bbox_list_sel) > 0)
                     else True
                 ):
@@ -506,13 +553,15 @@ class MultiIconDataset:
                 scene_dict[cluster][2] = max(scene_dict[cluster][2], x2)  # max x
                 scene_dict[cluster][3] = max(scene_dict[cluster][3], y2)  # max y
 
+        cluster_level = {icon["cluster"]: icon["overlap_level"] for icon in gt_list}
         scene_list = []
-        for scene, bbox in enumerate(scene_dict.items()):
+        for scene, (cluster, bbox) in enumerate(scene_dict.items()):
             scene_list.append(
                 {
                     "element_type": "Scene",
                     "represents": f"cluster{scene}",
-                    "bounding_box": bbox[-1],
+                    "bounding_box": bbox,
+                    "overlap_level": cluster_level[cluster],
                 }
             )
 
@@ -557,8 +606,33 @@ class MultiIconDataset:
 
 
 
+    @staticmethod
+    def overlap_folder_tag(Config):
+        """
+        Folder-name part describing the overlap setting. A single level keeps the
+        original name (e.g. '00_to_00_percent_overlap_00_minimum_overlap_images'),
+        so existing s02/s03 outputs still line up. Several levels give e.g.
+        'mixed_overlap_00-00_00-10_10-20_per_image_02_minimum_overlap_images'.
+        """
+        levels = Config.overlap_levels
+        if len(levels) == 1:
+            lvl = levels[0]
+            return (
+                f"{_fmt_pct(lvl['min'])}_to_{_fmt_pct(lvl['max'])}_percent_overlap_"
+                f"{lvl['min_num']:02d}_minimum_overlap_images"
+            )
+        labels = "_".join(lvl["label"] for lvl in levels)
+        return (
+            f"mixed_overlap_{labels}_{Config.overlap_assignment}_"
+            f"{Config.min_num_overlap_images:02d}_minimum_overlap_images"
+        )
+
     def generate_synthetic_data(self, Config):
         global DF_LIST
+        if Config.overlap_assignment not in ("per_image", "per_cluster"):
+            raise ValueError(
+                f"overlap_assignment must be 'per_image' or 'per_cluster', got {Config.overlap_assignment!r}"
+            )
         # create a 4961 x 3508 pixel white canvas to place the selected images on it.
         # choice is based on 300DPI of A3 image
         output_folder = (
@@ -567,9 +641,13 @@ class MultiIconDataset:
             f"{Config.num_class[0]:02d}_to_{Config.num_class[1]:02d}_classes_"
             f"{Config.num_images_per_class[0]:02d}_to_{Config.num_images_per_class[1]:02d}_images_per_class_"
             f"{Config.minimum_icons:02d}_minimum_icons_"
-            f"{Config.min_overlap_of_images:02d}_to_{Config.max_overlap_of_images:02d}_percent_overlap_"
-            f"{Config.min_num_overlap_images:02d}_minimum_overlap_images_"
+            f"{self.overlap_folder_tag(Config)}_"
             f"{Config.max_scale_factor:.1f}_max_scaling_factor"
+        )
+        level_rng = random.Random(OVERLAP_LEVEL_SEED)
+        # per_image: every image gets one level, levels spread evenly over the batch
+        image_levels = balanced_level_assignment(
+            Config.num_synthetic, Config.overlap_levels, level_rng
         )
 
         os.makedirs(output_folder, exist_ok=True)
@@ -587,10 +665,23 @@ class MultiIconDataset:
             self.num_icon_per_cluster_list = random.choices([i for i in range(self.num_icons_per_cluster[0], self.num_icons_per_cluster[1]+1)], k=self.num_clusters)
             existing_bbox_list = []  # List to store bounding boxes of placed images
             icon_per_cluster_dict = {i:0 for i in range(self.num_clusters)}
+            # per_cluster: clusters of one image get different levels (overlap is only
+            # measured within a cluster, so each cluster can follow its own level)
+            if Config.overlap_assignment == "per_cluster":
+                cluster_levels = balanced_level_assignment(
+                    self.num_clusters, Config.overlap_levels, level_rng
+                )
+            else:
+                cluster_levels = [image_levels[synth_num]] * self.num_clusters
             for icon_meta in data_synth[synth_num]:
                 icon_meta['cluster'], icon_meta['cluster_center'] = random.choice(list(enumerate(self.cluster_points)))
                 max_num_icons = self.num_icon_per_cluster_list[icon_meta['cluster']]
-                
+                level = cluster_levels[icon_meta['cluster']]
+                icon_meta["overlap_level"] = level["label"]
+                icon_meta["overlap_min"] = level["min"]
+                icon_meta["overlap_max"] = level["max"]
+                icon_meta["overlap_min_num_images"] = level["min_num"]
+
                 if icon_per_cluster_dict[icon_meta['cluster']] >= max_num_icons:
                     icon_meta["paste_location"] = (None, None)
                     icon_meta["overlap_p"] = None
@@ -602,7 +693,7 @@ class MultiIconDataset:
                     self.get_paste_location(
                         icon_meta,
                         existing_bbox_list,
-                        Config,
+                        level,
                     )
                 )
                 icon_meta["paste_location"] = (p_x, p_y)
@@ -620,15 +711,20 @@ class MultiIconDataset:
         for synth_num in range(Config.num_synthetic):
             gt_list = self.form_image_and_save(data_synth, synth_num, output_folder)
             gt_list_list.append(gt_list)
-            outpath, DF = self.summarize_synthetic_data(
-                gt_list_list, out_path=os.path.join(output_folder, "data_summary.png")
-            )
-            DF["output_folder"] = [output_folder] * len(DF)
-            if len(DF_LIST) == 0:
-                DF_LIST = DF
-            else:
-                DF_LIST = pd.concat([DF_LIST, DF], axis=0)
+
+        # Summarise once per batch. (Previously this ran inside the loop above, so the
+        # cumulative table was appended to DF_LIST again after every image and the
+        # overall data_summary.xlsx contained many duplicate rows.)
+        outpath, DF = self.summarize_synthetic_data(
+            gt_list_list, out_path=os.path.join(output_folder, "data_summary.png")
+        )
+        DF["output_folder"] = output_folder
+        if len(DF_LIST) == 0:
+            DF_LIST = DF
+        else:
+            DF_LIST = pd.concat([DF_LIST, DF], axis=0)
         DF_LIST.to_excel("01_synthetic_data/data_summary.xlsx", index=False)
+        return DF
 
     def summarize_synthetic_data(
         self, listobject, out_path="01_synthetic_data/datasummary.png"
@@ -695,8 +791,17 @@ class MultiIconDataset:
         axs[1, 1].boxplot(df["overlap_p"])
         axs[1, 1].set_title("Overlap Area Distribution")
 
-        # Empty subplot (for layout symmetry)
-        axs[1, 2].axis("off")
+        # 6. Achieved overlap per requested overlap level
+        level_names = sorted(df["overlap_level"].unique())
+        axs[1, 2].boxplot(
+            [df.loc[df["overlap_level"] == lvl, "overlap_p"].values for lvl in level_names],
+            tick_labels=[
+                f"{lvl}\n(n={int((df['overlap_level'] == lvl).sum())})" for lvl in level_names
+            ],
+        )
+        axs[1, 2].set_title("Achieved Overlap % per Overlap Level")
+        axs[1, 2].set_xlabel("Requested overlap range (%)")
+        axs[1, 2].set_ylabel("Overlap %")
 
         plt.tight_layout()
         plt.savefig(out_path)
@@ -715,8 +820,8 @@ if __name__ == "__main__":
         num_class: int
         num_images_per_class: tuple[int, int]
         minimum_icons: int
-        min_overlap_of_images: float
-        max_overlap_of_images: float
+        overlap_levels: list  # built by make_overlap_levels()
+        overlap_assignment: str  # "per_image" or "per_cluster"
         min_num_overlap_images: int
         max_scale_factor: float
 
@@ -724,9 +829,16 @@ if __name__ == "__main__":
     num_class_list = ((5, 20),)
     num_images_per_class_list = ((3, 5),)
     minimum_icons_list = (20,)
-    overlap_of_images_list = (
-        (0, 0),
+    # Each entry is ONE batch (one output folder). A batch may hold several
+    # (min %, max %) overlap ranges; its images (or clusters) are spread evenly
+    # over them. A single range reproduces the old fixed-overlap behaviour and
+    # folder name, e.g. ((0, 0),).
+    overlap_level_sets = (
+        ((0, 0), (0, 10), (10, 20), (20, 30)),
     )
+    # "per_image":   every image uses one level, levels vary across the batch
+    # "per_cluster": clusters within the same image use different levels
+    overlap_assignment_list = ("per_image",)
     min_num_overlap_images_list = (0,)
     max_scale_factor_list = (3.0,)
     num_clusters_list = ((2, 5),)
@@ -745,7 +857,8 @@ if __name__ == "__main__":
         num_class,
         num_images_per_class,
         minimum_icons,
-        overlap_of_images,
+        overlap_ranges,
+        overlap_assignment,
         min_num_overlap_images,
         max_scale_factor,
         num_clusters,
@@ -755,28 +868,26 @@ if __name__ == "__main__":
         num_class_list,
         num_images_per_class_list,
         minimum_icons_list,
-        overlap_of_images_list,
+        overlap_level_sets,
+        overlap_assignment_list,
         min_num_overlap_images_list,
         max_scale_factor_list,
         num_clusters_list,
         num_icons_per_cluster
     ):
-        min_overlap_of_images, max_overlap_of_images = overlap_of_images
-        if max_overlap_of_images == 0:
-            min_num_overlap_images = 0
+        # With one level, per_image and per_cluster are identical: run it once.
+        if len(overlap_ranges) == 1 and overlap_assignment != overlap_assignment_list[0]:
+            continue
 
         Config.num_synthetic = num_synthetic
         Config.num_class = num_class
         Config.num_images_per_class = num_images_per_class
         Config.minimum_icons = minimum_icons
-        Config.max_overlap_of_images = max_overlap_of_images
-        Config.min_overlap_of_images = min_overlap_of_images
+        Config.overlap_levels = make_overlap_levels(overlap_ranges, min_num_overlap_images)
+        Config.overlap_assignment = overlap_assignment
         Config.min_num_overlap_images = min_num_overlap_images
         Config.max_scale_factor = max_scale_factor
         Config.num_clusters = num_clusters
         Config.num_icon_per_cluster = num_icon_per_cluster
 
-        if max_overlap_of_images - min_overlap_of_images >= 0:
-            DF = dataset_obj.generate_synthetic_data(
-                Config,
-            )
+        DF = dataset_obj.generate_synthetic_data(Config)

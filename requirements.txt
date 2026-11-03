@@ -9,4 +9,7 @@ onnxruntime
 onnx
 easyocr
 hungarian-algorithm
+scipy
+torchmetrics
+torchvision
 pymupdf
