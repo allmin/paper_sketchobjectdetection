@@ -883,7 +883,7 @@ if __name__ == "__main__":
         min_num_overlap_images: int
         max_scale_factor: float
 
-    num_synthetic_list = (100,)
+    num_synthetic_list = (200,)
     num_class_list = ((5, 20),)
     num_images_per_class_list = ((3, 5),)
     minimum_icons_list = (20,)
@@ -891,9 +891,7 @@ if __name__ == "__main__":
     # (min %, max %) overlap ranges; its images (or clusters) are spread evenly
     # over them. A single range reproduces the old fixed-overlap behaviour and
     # folder name, e.g. ((0, 0),).
-    overlap_level_sets = (
-        ((0, 10)),
-    )
+    overlap_level_sets = ((0, 10),)
     # "per_image":   every image uses one level, levels vary across the batch
     # "per_cluster": clusters within the same image use different levels
     overlap_assignment_list = ("per_image",)
