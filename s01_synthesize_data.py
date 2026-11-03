@@ -27,15 +27,34 @@ def _fmt_pct(value):
     return f"{int(value):02d}" if float(value).is_integer() else f"{value:g}"
 
 
+def _is_single_range(value):
+    """True for a (min %, max %) pair of numbers, e.g. (0, 10)."""
+    return (
+        isinstance(value, (tuple, list))
+        and len(value) == 2
+        and all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in value)
+    )
+
+
 def make_overlap_levels(overlap_ranges, min_num_overlap_images):
     """
     Turn a list of (min %, max %) overlap ranges into level dicts used during placement.
 
     Each level carries its own min_num_overlap_images; it is forced to 0 for a
     zero-overlap level (as the original single-level code did).
+
+    A single bare range such as (0, 10) is accepted too and means [(0, 10)].
     """
+    if _is_single_range(overlap_ranges):
+        overlap_ranges = [overlap_ranges]
     if len(overlap_ranges) == 0:
         raise ValueError("At least one overlap range is required")
+    for rng_ in overlap_ranges:
+        if not _is_single_range(rng_):
+            raise ValueError(
+                f"Each overlap range must be a (min %, max %) pair, got {rng_!r} "
+                f"in {overlap_ranges!r}"
+            )
     levels = []
     for low, high in overlap_ranges:
         if high < low:
@@ -887,10 +906,13 @@ if __name__ == "__main__":
     num_class_list = ((5, 20),)
     num_images_per_class_list = ((3, 5),)
     minimum_icons_list = (20,)
-    # Each entry is ONE batch (one output folder). A batch may hold several
-    # (min %, max %) overlap ranges; its images (or clusters) are spread evenly
-    # over them. A single range reproduces the old fixed-overlap behaviour and
-    # folder name, e.g. ((0, 0),).
+    # Each entry is ONE batch (one output folder). An entry is either
+    #   - a single (min %, max %) range: fixed overlap, old behaviour and folder name
+    #   - a tuple of ranges: images (or clusters) are spread evenly over them
+    # Examples:
+    #   overlap_level_sets = ((0, 10),)                     one batch, 0-10 %
+    #   overlap_level_sets = ((0, 0), (0, 10))              two batches: 0-0 % and 0-10 %
+    #   overlap_level_sets = (((0, 0), (0, 10), (10, 20)),) one batch mixing three ranges
     overlap_level_sets = ((0, 10),)
     # "per_image":   every image uses one level, levels vary across the batch
     # "per_cluster": clusters within the same image use different levels
@@ -931,15 +953,16 @@ if __name__ == "__main__":
         num_clusters_list,
         num_icons_per_cluster
     ):
+        overlap_levels = make_overlap_levels(overlap_ranges, min_num_overlap_images)
         # With one level, per_image and per_cluster are identical: run it once.
-        if len(overlap_ranges) == 1 and overlap_assignment != overlap_assignment_list[0]:
+        if len(overlap_levels) == 1 and overlap_assignment != overlap_assignment_list[0]:
             continue
 
         Config.num_synthetic = num_synthetic
         Config.num_class = num_class
         Config.num_images_per_class = num_images_per_class
         Config.minimum_icons = minimum_icons
-        Config.overlap_levels = make_overlap_levels(overlap_ranges, min_num_overlap_images)
+        Config.overlap_levels = overlap_levels
         Config.overlap_assignment = overlap_assignment
         Config.min_num_overlap_images = min_num_overlap_images
         Config.max_scale_factor = max_scale_factor
