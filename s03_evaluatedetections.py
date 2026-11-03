@@ -10,10 +10,9 @@ import torch
 from PIL import Image, ImageDraw
 from scipy.optimize import linear_sum_assignment
 from sentence_transformers import SentenceTransformer, util
-from torch import tensor
-from torchmetrics.detection import MeanAveragePrecision
-from torchvision.ops import box_iou
 from tqdm import tqdm
+# torchmetrics / torchvision are imported only where the optional detection
+# metrics need them (see COMPUTE_DETECTION_METRICS).
 
 # ---------------------------------------------------------------------------
 # Which data to evaluate. Change as you wish:
@@ -45,6 +44,15 @@ EVALUATION_ROOT = "03_evaluation_real" if USE_REAL_DATA else "03_evaluation"
 MATCHING_METHOD = "hungarian"
 SEMANTIC_WEIGHT = 0.5
 
+# ---------------------------------------------------------------------------
+# COCO-style detection metrics (mAP, mAR, ... from torchmetrics' MeanAveragePrecision).
+#   False (default) -> skipped; results contain only the precision/recall from the
+#                      matching above. torchmetrics/torchvision are not needed.
+#   True            -> also computed and appended to the "Result summary" sheet
+#                      and the super summary.
+# ---------------------------------------------------------------------------
+COMPUTE_DETECTION_METRICS = False
+
 @lru_cache(maxsize=300)
 def _open_image_cached(path):
     return Image.open(path)
@@ -75,6 +83,8 @@ class CustomAREvaluator:
                 if len(tgt_boxes) == 0:
                     recalls.append(1.0)
                     continue
+
+                from torchvision.ops import box_iou
 
                 # Sort predictions by confidence
                 idx = torch.argsort(pred_scores, descending=True)
@@ -125,6 +135,8 @@ class SemanticLabelMapper:
         Returns integer class ID for a predicted text label.
         Uses semantic similarity to find the closest GT class.
         """
+        if not isinstance(predicted_label, str) or not predicted_label.strip():
+            return (-1, 0.0)  # missing/empty label -> no class
         pred_emb = self.model.encode(predicted_label, convert_to_tensor=True)
 
         # Compute cosine similarity
@@ -150,7 +162,11 @@ class Evaluator:
     cache_export = {}
     semantic_model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
     def __init__(self, proximity_metric='iou', semantic_threshold=0.5, semantic_model_name="sentence-transformers/all-MiniLM-L6-v2", normalized_box=True, run_once=True,
-                 matching=None, semantic_weight=None):
+                 matching=None, semantic_weight=None, compute_detection_metrics=None):
+        # mAP / mAR etc.: None -> follow the COMPUTE_DETECTION_METRICS flag
+        self.detection_metrics = (
+            COMPUTE_DETECTION_METRICS if compute_detection_metrics is None else compute_detection_metrics
+        )
         self.matching = (matching or MATCHING_METHOD).lower()
         if self.matching not in ("hungarian", "greedy"):
             raise ValueError(f"Unknown matching method: {self.matching}")
@@ -459,6 +475,54 @@ class Evaluator:
         return tp_df, fp_df, fn_df
 
 
+    def compute_detection_metrics(self, GT_DF, PRED_DF):
+        """COCO-style mAP / mAR over all evaluated images (torchmetrics).
+        Labels are mapped to GT class ids by semantic similarity; the similarity
+        is used as the detection score. Only runs when COMPUTE_DETECTION_METRICS
+        (or compute_detection_metrics=True) is set."""
+        from torchmetrics.detection import MeanAveragePrecision
+
+        def boxes_tensor(boxes):
+            # shape (N, 4) also when N == 0 (an image whose predictions were all dropped)
+            return torch.tensor(boxes, dtype=torch.float32).reshape(-1, 4)
+
+        gt_classes = GT_DF.represents.unique()
+        mapper = SemanticLabelMapper(gt_classes,threshold=self.semantic_threshold, model_name=self.semantic_model_name)
+        image_ids = GT_DF.uid.unique()
+        preds = []
+        target = []
+        for image_id in image_ids:
+            gt_rows = GT_DF[GT_DF.uid == image_id]
+            pred_rows = PRED_DF[PRED_DF.uid==image_id]
+            gt_ids_sims = mapper.map_batch(gt_rows['represents'])
+            pred_ids_sims = mapper.map_batch(pred_rows['represents'])
+            gt_ids = [k[0] for k in gt_ids_sims]
+
+            pred_ids = [k[0] for k in pred_ids_sims]
+            pred_sims = [k[1] for k in pred_ids_sims]
+            pred_bboxes = pred_rows['reconst_bounding_box'].tolist()
+
+            # Drop predictions whose label matches no GT class (the mapper returns
+            # id -1 when the best similarity is below the semantic threshold).
+            pred_ids_filt, pred_sims_filt, pred_bbox_filt = [],[],[]
+            for (pi, ps, bb) in zip(pred_ids, pred_sims, pred_bboxes):
+                if pi is not None and pi >= 0:
+                    pred_ids_filt.append(pi)
+                    pred_sims_filt.append(ps)
+                    pred_bbox_filt.append(bb)
+
+            image_dict_pred = dict( boxes = boxes_tensor(pred_bbox_filt),
+                                    scores = torch.tensor(pred_sims_filt, dtype=torch.float32),
+                                    labels = torch.tensor(pred_ids_filt, dtype=torch.int64))
+            image_dict_gt =  dict( boxes = boxes_tensor(gt_rows['bounding_box'].tolist()),
+                                    labels = torch.tensor(gt_ids, dtype=torch.int64))
+            preds.append(image_dict_pred)
+            target.append(image_dict_gt)
+        map_metric = MeanAveragePrecision(iou_type="bbox", box_format="xyxy", iou_thresholds=[0.30, 0.40, 0.50, 0.60, 0.70])
+        map_metric.update(preds, target)
+        result_map = map_metric.compute()
+        return pd.DataFrame({"metric":result_map.keys(), "value":[t.item() if (t.ndim == 0) else t.tolist() for t in result_map.values()]})
+
     def get_metrics(self, tp_df,fp_df,fn_df):
         tp = len(tp_df)
         fp = len(fp_df)
@@ -654,45 +718,8 @@ class Evaluator:
             print(f"No ground-truth/prediction pairs for pipeline {pipeline_name} in {data_dir}, skipping")
             return None, None
 
-        ##### calculating mAP-x
-
-        gt_classes = GT_DF.represents.unique()
-        mapper = SemanticLabelMapper(gt_classes,threshold=self.semantic_threshold, model_name=self.semantic_model_name)
-        image_ids = GT_DF.uid.unique()
-        preds = []
-        target = []
-        for image_id in image_ids:
-            gt_rows = GT_DF[GT_DF.uid == image_id]
-            pred_rows = PRED_DF[PRED_DF.uid==image_id]
-            gt_ids_sims = mapper.map_batch(gt_rows['represents'])
-            pred_ids_sims = mapper.map_batch(pred_rows['represents'])
-            gt_ids = [k[0] for k in gt_ids_sims]
-
-            pred_ids = [k[0] for k in pred_ids_sims]
-            pred_sims = [k[1] for k in pred_ids_sims]
-            pred_bboxes = pred_rows['reconst_bounding_box'].tolist()
-
-            pred_ids_filt, pred_sims_filt, pred_bbox_filt = [],[],[]
-            for (pi, ps, bb) in zip(pred_ids, pred_sims, pred_bboxes):
-                if pi is not None:
-                    pred_ids_filt.append(pi)
-                    pred_sims_filt.append(ps)
-                    pred_bbox_filt.append(bb)
-
-            image_dict_pred = dict( boxes = tensor(pred_bbox_filt),
-                                    scores = tensor(pred_sims_filt),
-                                    labels = tensor(pred_ids_filt))
-            image_dict_gt =  dict( boxes = tensor(gt_rows['bounding_box'].tolist()),
-                                    labels = tensor(gt_ids))
-            preds.append(image_dict_pred)
-            target.append(image_dict_gt)
-        map_metric = MeanAveragePrecision(iou_type="bbox", box_format="xyxy", iou_thresholds=[0.30, 0.40, 0.50, 0.60, 0.70])
-        map_metric.update(preds, target)
-        result_map = map_metric.compute()
-        result_map_df = pd.DataFrame({"metric":result_map.keys(), "value":[t.item() if (t.ndim == 0) else t.tolist() for t in result_map.values()]})
-
-            
-
+        ##### optional COCO-style metrics (mAP, mAR, ...)
+        result_map_df = self.compute_detection_metrics(GT_DF, PRED_DF) if self.detection_metrics else None
 
         #################################
         for consider_proximity in [True, False]:
@@ -722,9 +749,9 @@ class Evaluator:
                 FN_DF.to_excel(writer, sheet_name=f"False Negatives {suffix}", index=False)
                 RES_DF.to_excel(writer, sheet_name=f"Result {suffix}", index=False)
             
-            summary_df1 = self.get_summary(result_df)
-            summary_df2 = result_map_df
-            summary_df = pd.concat([summary_df1, summary_df2])
+            summary_df = self.get_summary(result_df)
+            if result_map_df is not None:
+                summary_df = pd.concat([summary_df, result_map_df])
             summary_df.to_excel(writer, sheet_name=f"Result summary", index=False)
         print(f"Saved detailed results to {out_path}")
         
