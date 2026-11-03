@@ -52,8 +52,16 @@ def make_overlap_levels(overlap_ranges, min_num_overlap_images):
 
 
 def balanced_level_assignment(n, levels, rng):
-    """Assign n items to levels so each level is used equally often (+-1), in random order."""
-    assigned = [levels[i % len(levels)] for i in range(n)]
+    """
+    Assign n items to levels so each level is used equally often (+-1), in random order.
+
+    The levels are shuffled before cycling, so when n < len(levels) (e.g. an image
+    with 2 clusters and 4 levels) a random subset is used rather than always the
+    first levels.
+    """
+    order = list(levels)
+    rng.shuffle(order)
+    assigned = [order[i % len(order)] for i in range(n)]
     rng.shuffle(assigned)
     return assigned
 
@@ -78,59 +86,55 @@ class MultiIconDataset:
         )
         self.image_cache = {}
 
-    def _icon_area(self, icon_meta):
+    # ------------------------------------------------------------------
+    # Overlap as COVERED AREA
+    #
+    # The overlap of icon A is the share of A that is covered by at least one
+    # other icon of the same cluster:
+    #
+    #     overlap_p(A) = |A  ∩  union(other icons in A's cluster)| / |A| * 100
+    #
+    # A region covered by two or more other icons is counted once, so the value
+    # is always within 0..100. "A" is the icon's foreground mask
+    # (overlap_logic="pixel") or its whole bounding box ("bounding_box").
+    #
+    # Each placed icon keeps a boolean "covered" array in its own frame. When a
+    # new icon is accepted, the covered arrays (and overlap_p) of the icons it
+    # touches are updated, so later placements are checked against current values.
+    # ------------------------------------------------------------------
+
+    def _occupancy(self, icon_meta):
+        """Boolean array (icon frame) of the pixels that count as the icon's area."""
+        if self.overlap_logic == "pixel":
+            return icon_meta["foreground_mask"].astype(bool)
         if self.overlap_logic == "bounding_box":
-            icon_height, icon_width = icon_meta["image"].shape[:2]
-            area = max(0, icon_width) * max(0, icon_height)
-        elif self.overlap_logic == "pixel":
-            area = int(np.sum(np.sum(icon_meta["foreground_mask"])))
-        return area
+            return np.ones(icon_meta["image"].shape[:2], dtype=bool)
+        raise ValueError(f"Unknown overlap logic: {self.overlap_logic}")
 
-    def _bbox_overlap_area(self, a, b):
-        ax0, ay0, ax1, ay1 = a
-        bx0, by0, bx1, by1 = b
+    def _prepare_overlap_state(self, icon_meta):
+        """Cache occupancy and area on the icon (once) before it is placed."""
+        if "occupancy" not in icon_meta:
+            icon_meta["occupancy"] = self._occupancy(icon_meta)
+            icon_meta["icon_area"] = int(icon_meta["occupancy"].sum())
 
-        overlap_w = max(0, min(ax1, bx1) - max(ax0, bx0))
-        overlap_h = max(0, min(ay1, by1) - max(ay0, by0))
-
-        return overlap_w * overlap_h
-
-    def _pixel_overlap(self, icon_bbox, icon_mask, existing_bbox, existing_mask):
-        # Step 1: find overlap region in canvas coords
-        x0 = max(icon_bbox[0], existing_bbox[0])
-        y0 = max(icon_bbox[1], existing_bbox[1])
-        x1 = min(icon_bbox[2], existing_bbox[2])
-        y1 = min(icon_bbox[3], existing_bbox[3])
-
+    @staticmethod
+    def _intersection(a, b):
+        """Canvas-coordinate intersection (x0, y0, x1, y1) of two boxes, or None."""
+        x0, y0 = max(a[0], b[0]), max(a[1], b[1])
+        x1, y1 = min(a[2], b[2]), min(a[3], b[3])
         if x0 >= x1 or y0 >= y1:
-            return 0  # no overlap
+            return None
+        return x0, y0, x1, y1
 
-        # Step 2: convert to local coordinates
-        icon_slice = self._extract_region(icon_bbox, icon_mask, x0, y0, x1, y1)
-        existing_slice = self._extract_region(
-            existing_bbox, existing_mask, x0, y0, x1, y1
-        )
+    @staticmethod
+    def _local_slices(bbox, region):
+        """Slices selecting a canvas region inside an icon's own frame."""
+        x0, y0, x1, y1 = region
+        return (slice(y0 - bbox[1], y1 - bbox[1]), slice(x0 - bbox[0], x1 - bbox[0]))
 
-        # Step 3: align shapes safely
-        h = min(icon_slice.shape[0], existing_slice.shape[0])
-        w = min(icon_slice.shape[1], existing_slice.shape[1])
-
-        icon_slice = icon_slice[:h, :w]
-        existing_slice = existing_slice[:h, :w]
-
-        # Step 4: compute overlap
-        return int(np.sum(np.logical_and(icon_slice, existing_slice)))
-
-    def _extract_region(self, bbox, mask, x0, y0, x1, y1):
-        bx0, by0, _, _ = bbox
-        local_x0 = x0 - bx0
-        local_y0 = y0 - by0
-        local_x1 = x1 - bx0
-        local_y1 = y1 - by0
-        h, w = mask.shape[:2]
-        local_x1 = min(local_x1, w)
-        local_y1 = min(local_y1, h)
-        return mask[local_y0:local_y1, local_x0:local_x1]
+    @staticmethod
+    def _pct(covered_px, area):
+        return covered_px / area * 100 if area > 0 else 0.0
 
     # def load_image(self, path):
     #     if path not in self.image_cache.keys():
@@ -251,51 +255,89 @@ class MultiIconDataset:
 
     def calculate_overlap_percentage(self, icon_bbox, icon_meta, existing_bbox_list):
         """
-        Compute how much the given icon overlaps (in %) with existing icons
-        from the same cluster.
+        Covered-area overlap of a candidate placement with icons of the same cluster.
+
+        Returns (overlap_percentage, covered, overlap_info):
+          overlap_percentage  % of the candidate icon covered by existing icons
+          covered             boolean array (icon frame) of those covered pixels
+          overlap_info        one entry per existing icon the candidate touches:
+                              (existing_meta, slices, newly_covered, new_percent)
+                              where new_percent is that icon's covered-area overlap
+                              AFTER the candidate is added. Pass the whole result to
+                              commit_overlap() once the placement is accepted.
         """
-
-        icon_mask = icon_meta["foreground_mask"]
-        icon_area = self._icon_area(icon_meta)
-        icon_meta["icon_area"] = icon_area
-
-        # Only compare with same-cluster icons
-        same_cluster = [
-            (ind, bbox, meta)
-            for ind, (bbox, meta) in enumerate(existing_bbox_list)
-            if meta["cluster"] == icon_meta["cluster"]
-        ]
-
-        total_overlap = 0
+        self._prepare_overlap_state(icon_meta)
+        occ = icon_meta["occupancy"]
+        covered = None
         overlap_info = []
 
-        for ind, existing_bbox, existing_meta in same_cluster:
-            if self.overlap_logic == "bounding_box":
-                overlap = self._bbox_overlap_area(icon_bbox, existing_bbox)
+        for existing_bbox, existing_meta in existing_bbox_list:
+            if existing_meta["cluster"] != icon_meta["cluster"]:
+                continue  # only icons of the same cluster count
+            region = self._intersection(icon_bbox, existing_bbox)
+            if region is None:
+                continue
+            new_sl = self._local_slices(icon_bbox, region)
+            ex_sl = self._local_slices(existing_bbox, region)
+            new_occ = occ[new_sl]
+            ex_occ = existing_meta["occupancy"][ex_sl]
 
-            elif self.overlap_logic == "pixel":
-                overlap = self._pixel_overlap(
-                    icon_bbox,
-                    icon_mask,
-                    existing_bbox,
-                    existing_meta["foreground_mask"],
-                )
+            # candidate pixels covered by this existing icon (union over all of them)
+            hit = new_occ & ex_occ
+            if hit.any():
+                if covered is None:
+                    covered = np.zeros_like(occ)
+                covered[new_sl] |= hit
 
-            else:
-                raise ValueError(f"Unknown overlap logic: {self.overlap_logic}")
+            # existing-icon pixels that the candidate would newly cover
+            newly = hit & ~existing_meta["covered"][ex_sl]
+            n_new = int(newly.sum())
+            if n_new > 0:
+                new_pct = self._pct(
+                    existing_meta["covered_px"] + n_new, existing_meta["icon_area"]
+                )
+                overlap_info.append((existing_meta, ex_sl, newly, new_pct))
 
-            if overlap > 0:
-                total_overlap += overlap
-                # The updated overlap percent of existing icons
-                after_overlap_existing_percent = (
-                    existing_meta["overlap_p"]
-                    + (overlap / existing_meta["icon_area"]) * 100
-                )
-                overlap_info.append(
-                    (ind, existing_meta, overlap, after_overlap_existing_percent)
-                )
-        overlap_percentage = (total_overlap / icon_area) * 100 if icon_area > 0 else 0
-        return (overlap_percentage, overlap_info)
+        if covered is None:
+            covered = np.zeros_like(occ)
+        overlap_percentage = self._pct(int(covered.sum()), icon_meta["icon_area"])
+        return overlap_percentage, covered, overlap_info
+
+    def commit_overlap(self, icon_meta, overlap_percentage, covered, overlap_info):
+        """Record an accepted placement: set the new icon's overlap state and
+        update the overlap of every existing icon it covers."""
+        icon_meta["covered"] = covered
+        icon_meta["covered_px"] = int(covered.sum())
+        icon_meta["overlap_p"] = overlap_percentage
+        for existing_meta, ex_sl, newly, new_pct in overlap_info:
+            existing_meta["covered"][ex_sl] |= newly
+            existing_meta["covered_px"] += int(newly.sum())
+            existing_meta["overlap_p"] = new_pct
+
+    def recompute_final_overlaps(self, placed):
+        """
+        Recompute every placed icon's covered-area overlap from the finished
+        layout (independent of the incremental bookkeeping) and store it in
+        overlap_p. Returns the largest difference to the incremental value,
+        which should be 0.
+        """
+        max_diff = 0.0
+        for meta in placed:
+            bbox = meta["bounding_box"]
+            covered = np.zeros_like(meta["occupancy"])
+            for other in placed:
+                if other is meta or other["cluster"] != meta["cluster"]:
+                    continue
+                region = self._intersection(bbox, other["bounding_box"])
+                if region is None:
+                    continue
+                sl = self._local_slices(bbox, region)
+                other_sl = self._local_slices(other["bounding_box"], region)
+                covered[sl] |= meta["occupancy"][sl] & other["occupancy"][other_sl]
+            final = self._pct(int(covered.sum()), meta["icon_area"])
+            max_diff = max(max_diff, abs(final - meta["overlap_p"]))
+            meta["overlap_p"] = final
+        return max_diff
 
     def insert_icon_on_canvas(self, canvas, icon, x, y):
 
@@ -442,19 +484,40 @@ class MultiIconDataset:
         `level` is the overlap level (see make_overlap_levels) that applies to this
         icon's image or cluster: min/max overlap in percent and min_num, the number
         of icons already in the cluster before the max-overlap limit is enforced.
-        Overlap is only measured against icons in the same cluster, and with
-        per-cluster levels all icons of a cluster share the same level.
+        Overlap is covered area (see calculate_overlap_percentage), only measured
+        against icons in the same cluster; all icons of a cluster share one level.
+
+        A location is accepted when the icon lies on the canvas and
+          * its own overlap is <= max, and
+          * every existing icon it touches stays <= max after the addition
+            (both max checks are relaxed while the cluster holds <= min_num icons),
+          * its own overlap is >= min (if the cluster already has icons).
+        Overlap only grows as icons are added, so min stays satisfied, and the
+        neighbour check keeps every icon <= max in the final picture.
+
+        Returns (p_x, p_y, bbox, overlap_percent, skip_icon, overlap_state), where
+        overlap_state is (covered, overlap_info) for commit_overlap().
         """
+        eps = 1e-9  # tolerance for float comparisons of percentages
         min_overlap = level["min"]
         max_overlap = level["max"]
         min_num_overlap_images = level["min_num"]
         icon_height, icon_width = icon_meta["image"].shape[:2]
         icon_cluster_center = icon_meta["cluster_center"]
+        n_in_cluster = sum(
+            1 for _, meta in existing_bbox_list if meta["cluster"] == icon_meta["cluster"]
+        )
+        enforce_max = n_in_cluster > min_num_overlap_images
+        enforce_min = n_in_cluster > 0
         skip_icon = False
-        max_attempts = self.MAX_ATTEMPTS
         attempt = 0
+        p_x = p_y = icon_bounding_box = None
+        overlap_percent, overlap_state = None, None
         while True:
             attempt += 1
+            if attempt > self.MAX_ATTEMPTS:
+                skip_icon = True
+                break
 
             d_r = random.randint(0, self.cluster_radius)
             # random angle (in radians)
@@ -472,45 +535,23 @@ class MultiIconDataset:
                 p_x + icon_width,
                 p_y + icon_height,
             )
-            icon_bbox_begin_x = icon_bounding_box[0]
-            icon_bbox_begin_y = icon_bounding_box[1]
-            icon_bbox_end_x = icon_bounding_box[2]
-            icon_bbox_end_y = icon_bounding_box[3]
-            # calculate percentage of overlap with existing images on the canvas
-            overlap_percent, overlap_info = self.calculate_overlap_percentage(
+            if not self.is_icon_within_canvas(icon_bounding_box):
+                continue
+            # covered-area overlap of this icon, and of the neighbours after adding it
+            overlap_percent, covered, overlap_info = self.calculate_overlap_percentage(
                 icon_bounding_box, icon_meta, existing_bbox_list
             )
-            existing_bbox_list_sel = [
-                i for i in existing_bbox_list if i[1]["cluster"] == icon_meta["cluster"]
-            ]
-            if (
-                self.is_icon_within_canvas(icon_bounding_box)
-                and (
-                    overlap_percent <= max_overlap
-                    if len(existing_bbox_list_sel) > min_num_overlap_images
-                    else True
-                )
-                and (
-                    all(
-                        [
-                            after_merge_overlap < max_overlap
-                            for (_, _, _, after_merge_overlap) in overlap_info
-                        ]
-                    )
-                )
-            ):
-                if (
-                    overlap_percent >= min_overlap
-                    if (len(existing_bbox_list_sel) > 0)
-                    else True
-                ):
-                    break
+            if enforce_max:
+                if overlap_percent > max_overlap + eps:
+                    continue
+                if any(new_pct > max_overlap + eps for (_, _, _, new_pct) in overlap_info):
+                    continue
+            if enforce_min and overlap_percent < min_overlap - eps:
+                continue
+            overlap_state = (covered, overlap_info)
+            break
 
-            if attempt > max_attempts:
-                skip_icon = True
-                break
-
-        return p_x, p_y, icon_bounding_box, overlap_percent, skip_icon
+        return p_x, p_y, icon_bounding_box, overlap_percent, skip_icon, overlap_state
 
     def form_image_and_save(self, data_synth, synth_num, output_folder):
         image = self.empty_canvas.copy()
@@ -533,6 +574,9 @@ class MultiIconDataset:
             del icon_meta["image"]
             del icon_meta["skip_icon"]
             del icon_meta["foreground_mask"]
+            # working arrays used for the overlap bookkeeping
+            for key in ("occupancy", "covered", "covered_px"):
+                icon_meta.pop(key, None)
 
             gt_list.append(icon_meta)
         # Save the synthetic image and its ground truth labels as a .json file
@@ -689,7 +733,7 @@ class MultiIconDataset:
                     icon_meta["skip_icon"] = True
                     continue
                 
-                p_x, p_y, icon_bounding_box, overlap_percentage, skip_icon = (
+                p_x, p_y, icon_bounding_box, overlap_percentage, skip_icon, overlap_state = (
                     self.get_paste_location(
                         icon_meta,
                         existing_bbox_list,
@@ -697,13 +741,27 @@ class MultiIconDataset:
                     )
                 )
                 icon_meta["paste_location"] = (p_x, p_y)
-                icon_meta["overlap_p"] = overlap_percentage
                 icon_meta["bounding_box"] = icon_bounding_box
                 icon_meta["skip_icon"] = skip_icon
-                
-                if not icon_meta["skip_icon"]:
+
+                if skip_icon:
+                    icon_meta["overlap_p"] = None
+                else:
+                    # updates this icon AND the icons it overlaps
+                    covered, overlap_info = overlap_state
+                    self.commit_overlap(icon_meta, overlap_percentage, covered, overlap_info)
                     icon_per_cluster_dict[icon_meta['cluster']] += 1
                     existing_bbox_list.append((icon_bounding_box, icon_meta))
+
+            # Final overlaps from the finished layout (sanity check of the bookkeeping)
+            placed = [meta for _, meta in existing_bbox_list]
+            max_diff = self.recompute_final_overlaps(placed)
+            if max_diff > 1e-6:
+                print(f"WARNING image {synth_num}: incremental overlap differed from final by {max_diff:.4f}%")
+            over_max = [m for m in placed if m["overlap_p"] > m["overlap_max"] + 1e-9]
+            if over_max:
+                print(f"NOTE image {synth_num}: {len(over_max)} icon(s) above their max overlap "
+                      f"(placed while the cluster was below min_num_overlap_images)")
 
         # pasting the selected images on the canvas and saving the synthetic image along with its ground truth labels and bounding boxes in a .json file. The ground truth labels will include the class name, bounding box coordinates, overlap percentage, and scale factor for each pasted image.
         gt_list_list = []
@@ -834,7 +892,7 @@ if __name__ == "__main__":
     # over them. A single range reproduces the old fixed-overlap behaviour and
     # folder name, e.g. ((0, 0),).
     overlap_level_sets = (
-        ((0, 0), (0, 10), (10, 20), (20, 30)),
+        ((0, 10)),
     )
     # "per_image":   every image uses one level, levels vary across the batch
     # "per_cluster": clusters within the same image use different levels
