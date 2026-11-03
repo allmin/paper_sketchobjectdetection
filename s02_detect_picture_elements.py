@@ -11,7 +11,7 @@ import time
 #            (prepare them first with s01b_prepare_real_data.py)
 #   False -> synthetic data in 01_synthetic_data/<folder>/*.png
 # ---------------------------------------------------------------------------
-USE_REAL_DATA = True
+USE_REAL_DATA = False
 SYNTHETIC_DATA_ROOT = "01_synthetic_data"
 REAL_DATA_ROOT = "01_real_data"
 DATA_ROOT = REAL_DATA_ROOT if USE_REAL_DATA else SYNTHETIC_DATA_ROOT
@@ -76,7 +76,7 @@ if __name__ == "__main__":
     pipeline_scene_big_verify = Pipeline([scene_proposal_kde, object_detection_llm_big, object_verification_ensemble_small], **PREPROCESS)
     pipeline_scene_big_verify_ignore_big = Pipeline([scene_proposal_kde, object_detection_llm_big, object_verification_ensemble_small_ignore_big], **PREPROCESS)
 
-    selected_pipelines = [pipeline_big, pipeline_scene_big]
+    selected_pipelines = [pipeline_small, pipeline_scene_small, pipeline_big, pipeline_scene_big, pipeline_clip, pipeline_scene_big_verify_ignore_big]
     for selected_pipeline in selected_pipelines:
         IMAGE_DIRS = sorted(IMAGE_DIRS)
         for IMAGE_DIR in IMAGE_DIRS:
