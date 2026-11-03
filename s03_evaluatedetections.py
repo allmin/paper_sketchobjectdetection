@@ -248,7 +248,9 @@ class Evaluator:
         # text_ls = [text1.lower(), text2.lower()]
         # text_ls = sorted(text_ls)
         # text1, text2 = text_ls
-        if text1 is None or text2 is None:
+        # A missing or empty label (e.g. "unlabelled" from majority voting) never
+        # matches; such predictions are also left out of the false positives.
+        if not isinstance(text1, str) or not isinstance(text2, str) or not text1.strip() or not text2.strip():
             return (False, 0.0)
         similarity = Evaluator._cached_similarity(text1, text2)
         return (similarity >= threshold, similarity)

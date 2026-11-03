@@ -200,6 +200,10 @@ class Pipeline:
                 detection_dict["model_answers"] = det["model_answers"]
             if "text" in det:
                 detection_dict["text"] = det["text"]
+            if "votes" in det:  # majority-voting verifier: cleaned label -> count
+                detection_dict["votes"] = det["votes"]
+            if "detector_label" in det:
+                detection_dict["detector_label"] = det["detector_label"]
             detections_list.append(detection_dict)
 
         if self.scenes:
@@ -399,6 +403,8 @@ class Pipeline:
                 for det, veridit in zip(self.detections, verified_objects):
                     det['text'] = veridit['text']
                     det['model_answers'] = veridit['model_answers']
+                    if 'votes' in veridit:
+                        det['votes'] = veridit['votes']
                     det['detector_label'] = det['label']
                     det['label'] = veridit['final_label']
 

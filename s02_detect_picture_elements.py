@@ -68,6 +68,9 @@ if __name__ == "__main__":
     object_detection_llm_small = ObjectDetector(method="llm", params={"model_name":"gemma4:latest"}, name='icons')
     object_verification_ensemble_small = ObjectVerifier(models=["ministral-3:8b","llava:7b", "moondream:1.8b", "llama3.2-vision:latest", "minicpm-v:8b"], judge = "llama3.1:8b", method="ensemble", name="verify", use_known_label = True)
     object_verification_ensemble_small_ignore_big = ObjectVerifier(models=["ministral-3:8b","llava:7b", "llava:13b","gemma4:e4b", "moondream:1.8b", "llama3.2-vision:latest", "minicpm-v:8b"], judge = "llama3.1:8b", method="ensemble", name="verify_ignore_big", use_known_label = False)
+    # Same models, no LLM judge: cleaned labels are voted on, most frequent wins,
+    # ties -> unlabelled. Results go to a folder ending in "verify_ignore_big_majority".
+    object_verification_ensemble_small_ignore_big_majority = ObjectVerifier(models=["ministral-3:8b","llava:7b", "llava:13b","gemma4:e4b", "moondream:1.8b", "llama3.2-vision:latest", "minicpm-v:8b"], judge = "majority voting", method="ensemble", name="verify_ignore_big", use_known_label = False)
     pipeline_small = Pipeline([object_detection_llm_small], **PREPROCESS)
     pipeline_big = Pipeline([object_detection_llm_big], **PREPROCESS)
     pipeline_scene_small = Pipeline([scene_proposal_kde, object_detection_llm_small], **PREPROCESS)
@@ -75,8 +78,9 @@ if __name__ == "__main__":
     pipeline_clip = Pipeline([scene_proposal_kde, icon_proposal_kde, object_detection_clip], **PREPROCESS)
     pipeline_scene_big_verify = Pipeline([scene_proposal_kde, object_detection_llm_big, object_verification_ensemble_small], **PREPROCESS)
     pipeline_scene_big_verify_ignore_big = Pipeline([scene_proposal_kde, object_detection_llm_big, object_verification_ensemble_small_ignore_big], **PREPROCESS)
+    pipeline_scene_big_verify_ignore_big_majority = Pipeline([scene_proposal_kde, object_detection_llm_big, object_verification_ensemble_small_ignore_big_majority], **PREPROCESS)
 
-    selected_pipelines = [pipeline_small, pipeline_scene_small, pipeline_big, pipeline_scene_big, pipeline_clip, pipeline_scene_big_verify_ignore_big]
+    selected_pipelines = [pipeline_small, pipeline_scene_small, pipeline_big, pipeline_scene_big, pipeline_clip, pipeline_scene_big_verify_ignore_big, pipeline_scene_big_verify_ignore_big_majority]
     for selected_pipeline in selected_pipelines:
         IMAGE_DIRS = sorted(IMAGE_DIRS)
         for IMAGE_DIR in IMAGE_DIRS:

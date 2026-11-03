@@ -511,7 +511,7 @@ Respond with ONLY the JSON array.
 
         for det in detections:
             x1, y1, x2, y2 = det["x1"], det["y1"], det["x2"], det["y2"]
-            label = det.get("label", "?")
+            label = det.get("label", "?") or "unlabelled"  # "" = no majority among verifiers
             draw.rectangle([x1, y1, x2, y2], outline=box_color, width=2)
             # Draw label background
             bbox = draw.textbbox((0, 0), label, font=font)
@@ -613,6 +613,22 @@ Respond with ONLY the JSON array.
         self.modified_refined_detections = self._apply_offset(self.refined_detections)
         
 
+MAJORITY_VOTING = "majority voting"
+
+
+def normalize_label(label):
+    """
+    Clean a model's label for voting: lowercase, special characters replaced by a
+    space (so "house/building" -> "house building", not "housebuilding"),
+    repeated spaces collapsed. Letters with accents are kept. Returns "" for a
+    missing label.
+    """
+    if not label:
+        return ""
+    text = re.sub(r"[^\w\s]|_", " ", str(label).lower())
+    return " ".join(text.split())
+
+
 class ObjectVerifier:
     def __init__(
         self,
@@ -623,9 +639,32 @@ class ObjectVerifier:
         use_known_label = False,
         request_timeout = 90,
         max_predict_tokens = 30,
+        require_absolute_majority = False,
     ):
+        """
+        judge: an ollama model name (an LLM picks the final label), or
+               "majority voting" (no LLM): every model's label is cleaned with
+               normalize_label() and the most frequent one wins. If the top count
+               is tied (e.g. every model says something different), the object is
+               left unlabelled (final label ""). OCR text is not used in this mode.
+               With use_known_label=True the detector's own label is one more vote.
+        require_absolute_majority: majority voting only. False -> the most frequent
+               label wins (ties -> unlabelled). True -> it must also have more than
+               half of the votes cast, else unlabelled.
+
+        The pipeline's output folder is named after `name`, not the judge. So that
+        majority-voting results never mix with (or get skipped because of) LLM-judge
+        results, "_majority" is appended to the name in that mode unless it already
+        contains "majority".
+        """
         self.models = models
         self.judge = judge
+        self.majority_vote = str(judge).strip().lower().replace("_", " ").replace("-", " ") in (
+            MAJORITY_VOTING, "majority", "majority vote"
+        )
+        if self.majority_vote and "majority" not in name:
+            name = f"{name}_majority"
+        self.require_absolute_majority = require_absolute_majority
         self.name = name
         self.type = 'object_verification'
         self.method = method
@@ -713,6 +752,28 @@ class ObjectVerifier:
         # status == "error"
         return f"[ERROR from {model}: {value}]"
  
+    def _majority_vote(self, model_answers):
+        """
+        Returns (final_label, votes): votes maps each cleaned label to its count.
+        Empty answers (errors/timeouts) do not vote. final_label is "" (unlabelled)
+        when nobody answered, when the top count is tied, or - with
+        require_absolute_majority - when the winner has no more than half the votes.
+        """
+        votes = {}
+        for ans in model_answers.values():
+            label = normalize_label(ans)
+            if label:
+                votes[label] = votes.get(label, 0) + 1
+        if not votes:
+            return "", votes
+        ranked = sorted(votes.items(), key=lambda kv: kv[1], reverse=True)
+        top_label, top_count = ranked[0]
+        if len(ranked) > 1 and ranked[1][1] == top_count:
+            return "", votes  # tie -> no majority
+        if self.require_absolute_majority and top_count * 2 <= sum(votes.values()):
+            return "", votes
+        return top_label, votes
+
     def _judge(self, model_answers, ocr_text):
         judge_prompt = (
             "You are an ensemble judge. Multiple vision models were asked to identify "
@@ -793,9 +854,14 @@ class ObjectVerifier:
             if item['known_label'] and self.use_known_label:
                 evidences.update(item['known_label'])
             t0 = time.time()
-            final_label = self._judge(evidences, item["text"])
+            if self.majority_vote:
+                final_label, votes = self._majority_vote(evidences)
+                item["votes"] = votes
+            else:
+                final_label = self._judge(evidences, item["text"])
             dt = time.time() - t0
-            print(f"[judge:{self.judge}] icon {idx + 1}/{len(items)} -> {final_label!r} ({dt:.1f}s)", flush=True)
+            shown = final_label if final_label else "<unlabelled>"
+            print(f"[judge:{self.judge}] icon {idx + 1}/{len(items)} -> {shown!r} ({dt:.1f}s)", flush=True)
             results.append({**item, "final_label": final_label})
         return results
 
