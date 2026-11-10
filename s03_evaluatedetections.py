@@ -1,25 +1,40 @@
-import json
-import math
+"""
+s03: evaluate the detected picture elements (from s02) against the ground truth.
+
+For every pipeline x proximity metric x semantic threshold, predictions are matched
+one-to-one to ground-truth icons (see classes/evaluation.py), and per-image and
+overall precision / recall are written. A super summary collects all runs.
+
+Edit the SETTINGS section, then run:  python s03_evaluatedetections.py
+
+Code layout:
+  this file                      settings + main() (what to run, collect summary)
+  classes/evaluation.py          similarity, matching, metrics, Evaluator
+  classes/evaluation_plots.py    annotated images, IoU/similarity plot, sensitivity report
+  classes/detection_metrics.py   optional mAP / mAR
+"""
+
 import os
-from functools import lru_cache
+from dataclasses import dataclass
 from glob import glob
 
 import numpy as np
 import pandas as pd
-import torch
-from PIL import Image, ImageDraw
-from scipy.optimize import linear_sum_assignment
-from sentence_transformers import SentenceTransformer, util
-from tqdm import tqdm
-# torchmetrics / torchvision are imported only where the optional detection
-# metrics need them (see COMPUTE_DETECTION_METRICS).
 
-# ---------------------------------------------------------------------------
-# Which data to evaluate. Change as you wish:
+from classes.evaluation import Evaluator, Matcher, SemanticSimilarity, data_folder_name
+from classes.evaluation_plots import threshold_sensitivity_report
+
+# ===========================================================================
+# SETTINGS
+# ===========================================================================
+
+# --- Data -------------------------------------------------------------------
 #   True  -> real rich pictures: ground truth in 01_real_data/<folder>/*_gt.json
 #            (made by s01b_prepare_real_data.py), results in 03_evaluation_real/
-#   False -> synthetic data in 01_synthetic_data/, results in 03_evaluation/
-# ---------------------------------------------------------------------------
+#   False -> synthetic batches in 01_synthetic_data/<batch>/, results in 03_evaluation/
+# Every data folder (synthetic batch or real-data folder) is evaluated separately:
+# results go to <results root>/<pipeline>/<folder>/ and the folder name ends each
+# row name in super_summary.xlsx.
 USE_REAL_DATA = True
 SYNTHETIC_DATA_ROOT = "01_synthetic_data"
 REAL_DATA_ROOT = "01_real_data"
@@ -27,54 +42,28 @@ DETECTIONS_ROOT = "02_detected_picture_elements"
 DATA_ROOT = REAL_DATA_ROOT if USE_REAL_DATA else SYNTHETIC_DATA_ROOT
 EVALUATION_ROOT = "03_evaluation_real" if USE_REAL_DATA else "03_evaluation"
 
-# ---------------------------------------------------------------------------
-# How predictions are paired with ground truth (one-to-one in both cases):
-#   "hungarian" -> optimal bipartite matching (scipy linear_sum_assignment). Only pairs
-#                  that pass the thresholds (element type, semantic similarity, and
-#                  IoU / centre distance when the bbox is considered) may match. Among
-#                  those it maximises the NUMBER of matches first and then the total
-#                  match weight:
-#                      weight = SEMANTIC_WEIGHT * semantic_similarity
-#                             + (1 - SEMANTIC_WEIGHT) * box_proximity
-#                  where box_proximity is the IoU for 'iou*' metrics and
-#                  1 - distance / threshold (clipped to 0..1) for 'centerdist*' metrics.
-#                  The result does not depend on the order of the predictions.
-#   "greedy"    -> the original first-fit matching, in prediction order.
-# ---------------------------------------------------------------------------
-MATCHING_METHOD = "hungarian"
-SEMANTIC_WEIGHT = 0.5
+# --- Pipelines and settings to evaluate --------------------------------------
+# Default run on synthetic data: every pipeline x metric x threshold below.
+PIPELINES = ["llm_gemma4-31b_icons_rgb_fullres", "kde_scene_llm_gemma4-31b_icons_rgb_fullres"]
+PROXIMITY_METRICS = ['iou-10', 'iou-20', 'iou-30', 'iou-40', 'iou-50', 'iou-60', 'iou-70', 'iou-80', 'iou-90',
+                     'centerdist-100', 'centerdist-200', 'centerdist-400', 'centerdist-600', 'centerdist-800']
+SEMANTIC_THRESHOLDS = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
+# Only evaluate the images this reference pipeline also has predictions for, in
+# the same data folder (so all pipelines are compared on the same images).
+# None = all images. Not used on real data.
+REF_PIPELINE = "kde_scene_llm_gemma4-31b_icons_ensemble_verify"
 
-# ---------------------------------------------------------------------------
-# COCO-style detection metrics (mAP, mAR, ... from torchmetrics' MeanAveragePrecision).
-#   False (default) -> skipped; results contain only the precision/recall from the
-#                      matching above. torchmetrics/torchvision are not needed.
-#   True            -> also computed and appended to the "Result summary" sheet
-#                      and the super summary.
-# ---------------------------------------------------------------------------
-COMPUTE_DETECTION_METRICS = False
+# Quick run (synthetic data only): TEST_PIPELINES at the paper setting.
+TEST = True
+TEST_PIPELINES = [f"kde_scene_llm_gemma4-31b_icons_ensemble_verify_{model}_only"
+                  for model in ["ministral-3:8b", "llava:7b", "moondream:1.8b", "llama3.2-vision:latest", "minicpm-v:8b"]]
 
-# ---------------------------------------------------------------------------
-# Threshold sensitivity run
-#   True -> instead of the usual run, evaluate SENSITIVITY_PIPELINES at every
-#           semantic-similarity threshold in SENSITIVITY_THRESHOLDS (with
-#           SENSITIVITY_PROXIMITY), then write a report to
-#           <EVALUATION_ROOT>/threshold_sensitivity/:
-#             super_summary.xlsx      all results of this run
-#             sensitivity.xlsx        precision/recall per pipeline x threshold,
-#                                     ranks, and agreement with the ranking at
-#                                     SENSITIVITY_REFERENCE (Kendall's tau)
-#             threshold_sensitivity*.png
-#           The usual <EVALUATION_ROOT>/super_summary.xlsx is left untouched.
-# Default thresholds: the bootstrap 95% interval (0.344-0.474), the reported
-# 0.375, the bagged/logistic estimate 0.398 and the frequent bootstrap pick 0.443
-# (see s04_apps/bootstrap_threshold.py).
-# ---------------------------------------------------------------------------
-RUN_THRESHOLD_SENSITIVITY = False
-SENSITIVITY_THRESHOLDS = [0.344, 0.375, 0.398, 0.443, 0.474]
-SENSITIVITY_REFERENCE = 0.375
-SENSITIVITY_PROXIMITY = "iou-30"
-# pipeline folder -> name used in the paper (edit to match Table "Precision and Recall by Pipeline")
-SENSITIVITY_PIPELINES = {
+# Paper setting, used for real data and for TEST.
+PAPER_PROXIMITY_METRIC = 'iou-30'
+PAPER_SEMANTIC_THRESHOLD = 0.375
+
+# Pipelines in the paper's table: folder -> name used in the paper.
+PAPER_PIPELINES = {
     "kde_scene_kde_icon_clip_icons": "SIGC_clip",
     "llm_gemma4-latest_icons": "GC_small",
     "llm_gemma4-31b_icons": "GC_big",
@@ -82,1054 +71,165 @@ SENSITIVITY_PIPELINES = {
     "kde_scene_llm_gemma4-31b_icons": "SGC_big",
     "kde_scene_llm_gemma4-31b_icons_ensemble_verify": "SGC_big_ensemble",
 }
-# which summary rows to report (with-bbox matching; see Evaluator.get_summary)
+
+# --- Matching ------------------------------------------------------------------
+#   "hungarian" -> optimal one-to-one assignment among the pairs that pass the
+#                  label and box thresholds: most matches first, then the highest
+#                  total weight  SEMANTIC_WEIGHT * similarity + (1 - SEMANTIC_WEIGHT) * box proximity
+#                  (IoU, or 1 - distance/threshold for centre distance).
+#   "greedy"    -> the original first-fit matching, in prediction order.
+MATCHING_METHOD = "hungarian"
+SEMANTIC_WEIGHT = 0.5
+SEMANTIC_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
+
+# --- Optional COCO-style metrics (mAP, mAR, ...; needs torchmetrics) -------------
+COMPUTE_DETECTION_METRICS = False
+
+# --- Threshold sensitivity run -------------------------------------------------
+#   True -> instead of the runs above, evaluate SENSITIVITY_PIPELINES at every
+#           threshold in SENSITIVITY_THRESHOLDS and write a report (precision /
+#           recall per pipeline x threshold, ranks, Kendall's tau vs. the ranking
+#           at SENSITIVITY_REFERENCE, figures) to <EVALUATION_ROOT>/threshold_sensitivity/.
+#           The usual super_summary.xlsx is left untouched.
+# Thresholds: the bootstrap 95% interval (0.344-0.474), the reported 0.375, the
+# bagged/logistic estimate 0.398 and the frequent bootstrap pick 0.443
+# (see s04_apps/bootstrap_threshold.py).
+RUN_THRESHOLD_SENSITIVITY = False
+SENSITIVITY_THRESHOLDS = [0.344, 0.375, 0.398, 0.443, 0.474]
+SENSITIVITY_REFERENCE = 0.375
+SENSITIVITY_PROXIMITY = "iou-30"
+SENSITIVITY_PIPELINES = PAPER_PIPELINES
+# which summary rows to report (with-bbox matching; see classes.evaluation.summarize)
 SENSITIVITY_METRICS = {
     "precision": "considering bbox mean. precision",
     "recall": "considering bbox mean. recall",
 }
 
-@lru_cache(maxsize=300)
-def _open_image_cached(path):
-    return Image.open(path)
+ELEMENT_TYPES = ['Icon']
 
 
-def threshold_sensitivity_report(super_summary, out_dir, pipeline_labels=None, metrics=None,
-                                 reference=None, interval=None):
+# ===========================================================================
+# RUN
+# ===========================================================================
+
+@dataclass
+class RunPlan:
+    pipelines: list
+    proximity_metrics: list
+    semantic_thresholds: list
+    ref_pipeline: str = None
+    summary_dir: str = None
+    sensitivity: bool = False
+
+
+def select_run_plan():
     """
-    Turn a super summary (one row per pipeline|metric|threshold|matching[|folder])
-    into a sensitivity report: precision / recall per pipeline at each semantic
-    threshold, the pipeline ranks at each threshold, and how well each threshold's
-    ranking agrees with the one at `reference` (Kendall's tau, same best pipeline).
-    Writes sensitivity.xlsx and one figure per data folder to out_dir.
+    Which pipelines and settings to evaluate. In order of precedence:
+      1. RUN_THRESHOLD_SENSITIVITY -> SENSITIVITY_PIPELINES x SENSITIVITY_THRESHOLDS
+      2. USE_REAL_DATA             -> PIPELINES at the paper setting, all images
+      3. TEST                      -> TEST_PIPELINES at the paper setting
+      4. otherwise                 -> PIPELINES x PROXIMITY_METRICS x SEMANTIC_THRESHOLDS
     """
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-    from scipy.stats import kendalltau
-
-    pipeline_labels = pipeline_labels or SENSITIVITY_PIPELINES
-    metrics = metrics or SENSITIVITY_METRICS
-    reference = SENSITIVITY_REFERENCE if reference is None else reference
-    os.makedirs(out_dir, exist_ok=True)
-
-    rows = []
-    for _, r in super_summary.iterrows():
-        parts = str(r["pipeline"]).split("|")
-        pipe = parts[0].rsplit("_", 1)[0]  # strip "_<element type>"
-        row = dict(pipeline=pipe, label=pipeline_labels.get(pipe, pipe), proximity=parts[1],
-                   threshold=float(parts[2]), matching=parts[3] if len(parts) > 3 else "",
-                   data=parts[4] if len(parts) > 4 else "")
-        for name, col in metrics.items():
-            v = pd.to_numeric(r.get(col), errors="coerce")
-            row[name] = np.nan if pd.isna(v) or v < 0 else float(v)  # -1 = undefined
-        p, rc = row.get("precision"), row.get("recall")
-        row["f1"] = 2 * p * rc / (p + rc) if p is not None and rc is not None and (p + rc) > 0 else np.nan
-        rows.append(row)
-    long = pd.DataFrame(rows)
-    if long.empty:
-        print("Threshold sensitivity: nothing to report")
-        return None
-
-    # ranks per (data folder, proximity, matching, threshold): 1 = best
-    keys = ["data", "proximity", "matching", "threshold"]
-    for m in ["precision", "recall", "f1"]:
-        long[f"rank_{m}"] = long.groupby(keys)[m].rank(ascending=False, method="min")
-
-    agreement = []
-    for (data, prox, match), g in long.groupby(["data", "proximity", "matching"]):
-        ref = g[np.isclose(g.threshold, reference)].set_index("label")
-        for t, gt in g.groupby("threshold"):
-            gt = gt.set_index("label")
-            common = ref.index.intersection(gt.index)
-            row = dict(data=data, proximity=prox, matching=match, threshold=t, n_pipelines=len(common))
-            for m in ["precision", "recall", "f1"]:
-                a, b = ref.loc[common, m], gt.loc[common, m]
-                ok = a.notna() & b.notna()
-                tau = kendalltau(a[ok], b[ok]).statistic if ok.sum() >= 2 else np.nan
-                row[f"kendall_tau_{m}"] = tau
-                row[f"best_{m}"] = gt[m].idxmax() if gt[m].notna().any() else ""
-                row[f"same_best_{m}_as_{reference:g}"] = (
-                    bool(ref[m].notna().any() and gt[m].notna().any() and gt[m].idxmax() == ref[m].idxmax())
-                )
-            agreement.append(row)
-    agreement = pd.DataFrame(agreement)
-
-    with pd.ExcelWriter(os.path.join(out_dir, "sensitivity.xlsx"), engine="openpyxl") as w:
-        for m in ["precision", "recall", "f1"]:
-            long.pivot_table(index=["data", "label"], columns="threshold", values=m).to_excel(w, sheet_name=m)
-            long.pivot_table(index=["data", "label"], columns="threshold", values=f"rank_{m}").to_excel(
-                w, sheet_name=f"rank {m}")
-        agreement.to_excel(w, sheet_name=f"agreement with {reference:g}", index=False)
-        long.to_excel(w, sheet_name="all", index=False)
-
-    # one figure per data folder: precision and recall vs threshold, one line per pipeline
-    order = [l for l in pipeline_labels.values() if l in set(long.label)] + \
-            sorted(set(long.label) - set(pipeline_labels.values()))
-    colors = dict(zip(order, plt.get_cmap("tab10").colors))
-    fig_paths = []
-    for data, g in long.groupby("data"):
-        fig, axs = plt.subplots(1, 2, figsize=(11, 4.2), sharex=True)
-        for ax, m in zip(axs, ["precision", "recall"]):
-            for label in order:
-                d = g[g.label == label].sort_values("threshold")
-                if len(d):
-                    ax.plot(d.threshold, d[m], "o-", color=colors[label], label=label, lw=1.6, ms=4)
-            if interval:
-                ax.axvspan(*interval, color="#9db4c0", alpha=0.18, lw=0)
-            ax.axvline(reference, color="black", ls="--", lw=1)
-            ax.set(xlabel="semantic similarity threshold", ylabel=m, title=m.capitalize(), ylim=(0, 1.02))
-            ax.spines[["top", "right"]].set_visible(False)
-        axs[1].legend(fontsize=8, frameon=False, loc="center left", bbox_to_anchor=(1.0, 0.5))
-        fig.suptitle(f"Threshold sensitivity{(' | ' + data) if data else ''} "
-                     f"(dashed: reported {reference:g}" + (", band: bootstrap 95% CI)" if interval else ")"),
-                     fontsize=10)
-        fig.tight_layout()
-        path = os.path.join(out_dir, f"threshold_sensitivity{('_' + data) if data else ''}.png")
-        fig.savefig(path, dpi=200, bbox_inches="tight")
-        plt.close(fig)
-        fig_paths.append(path)
-    print(f"Saved threshold sensitivity report to {out_dir}")
-    return long, agreement, fig_paths
-
-
-def plot_iou_semantic_mapping(map_df, semantic_threshold, iou_threshold=None, title="", out_path=None):
-    """
-    Scatter of IoU (x) against semantic similarity (y) for the rows of
-    Evaluator.iou_semantic_mapping(), coloured by TP / FP / FN, with the two
-    matching thresholds as dashed lines and marginal histograms.
-    The four regions of the plot read as:
-      top-right      label and box both good enough (TP; FP/FN here lost the assignment)
-      top-left       right label, box misplaced
-      bottom-right   box on the object, wrong label
-      bottom-left    neither
-    iou_threshold=None (centre-distance metrics) draws only the semantic line.
-    """
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
-    styles = {
-        "TP": dict(color="#2a9d8f", marker="o", label="true positive (matched pair)"),
-        "FP": dict(color="#e76f51", marker="x", label="false positive → closest GT"),
-        "FN": dict(color="#6c757d", marker="^", label="false negative → closest prediction"),
-    }
-    fig = plt.figure(figsize=(7.5, 7))
-    grid = fig.add_gridspec(2, 2, width_ratios=(5, 1), height_ratios=(1, 5), wspace=0.04, hspace=0.04)
-    ax = fig.add_subplot(grid[1, 0])
-    ax_top = fig.add_subplot(grid[0, 0], sharex=ax)
-    ax_right = fig.add_subplot(grid[1, 1], sharey=ax)
-    bins = np.linspace(0, 1, 26)
-
-    for role, st in styles.items():
-        d = map_df[map_df.role == role] if len(map_df) else map_df
-        n = len(d)
-        if n == 0:
-            continue
-        ax.scatter(d.iou, d.semantic_similarity, s=22, alpha=0.6, color=st["color"], marker=st["marker"],
-                   label=f"{st['label']} (n={n})", linewidths=1)
-        ax_top.hist(d.iou, bins=bins, color=st["color"], alpha=0.5)
-        ax_right.hist(d.semantic_similarity, bins=bins, color=st["color"], alpha=0.5, orientation="horizontal")
-
-    ax.axhline(semantic_threshold, color="black", ls="--", lw=1)
-    ax.text(1.0, semantic_threshold, f" similarity {semantic_threshold:g}", va="bottom", ha="right", fontsize=8)
-    y_min = min(-0.02, map_df.semantic_similarity.min() - 0.02) if len(map_df) else -0.02
-    if iou_threshold is not None:
-        ax.axvline(iou_threshold, color="black", ls="--", lw=1)
-        ax.text(iou_threshold, y_min, f" IoU {iou_threshold:g}", va="bottom", ha="left", fontsize=8)
-        # TP / FP / FN counts in each of the four regions, in its top corner
-        if len(map_df):
-            for x_ok in (True, False):
-                for y_ok in (True, False):
-                    sel = map_df[((map_df.iou >= iou_threshold) == x_ok) &
-                                 ((map_df.semantic_similarity >= semantic_threshold) == y_ok)]
-                    counts = " · ".join(f"{r} {int((sel.role == r).sum())}" for r in styles)
-                    ax.text(0.99 if x_ok else 0.01, 1.0 if y_ok else semantic_threshold - 0.015, counts,
-                            ha="right" if x_ok else "left", va="top", fontsize=7.5, color="#333333",
-                            bbox=dict(facecolor="white", edgecolor="none", alpha=0.85, pad=1.5), zorder=5)
-    ax.set_xlim(-0.02, 1.02)
-    ax.set_ylim(y_min, 1.02)
-    ax.set_xlabel("IoU of bounding boxes")
-    ax.set_ylabel("semantic similarity of labels")
-    ax.legend(loc="lower center", bbox_to_anchor=(0.5, 1.22), fontsize=8, frameon=False, ncol=1)
-    ax_top.axis("off")
-    ax_right.axis("off")
-    if title:
-        fig.suptitle(title, fontsize=10, y=0.995)
-    for a in (ax,):
-        a.spines[["top", "right"]].set_visible(False)
-    if out_path:
-        fig.savefig(out_path, dpi=200, bbox_inches="tight")
-    plt.close(fig)
-    return out_path
-
-
-class CustomAREvaluator:
-    def __init__(self, iou_thresholds=[0.30, 0.40, 0.50, 0.60, 0.70], max_dets=[30, 40, 50, 60, 70]):
-        self.iou_thresholds = iou_thresholds
-        self.max_dets = max_dets
-        self.preds = []
-        self.targets = []
-
-    def update(self, preds, targets):
-        self.preds.extend(preds)
-        self.targets.extend(targets)
-
-    def compute(self):
-        results = {}
-
-        for K in self.max_dets:
-            recalls = []
-
-            for pred, tgt in zip(self.preds, self.targets):
-                pred_boxes = pred["boxes"]
-                pred_scores = pred["scores"]
-                tgt_boxes = tgt["boxes"]
-
-                if len(tgt_boxes) == 0:
-                    recalls.append(1.0)
-                    continue
-
-                from torchvision.ops import box_iou
-
-                # Sort predictions by confidence
-                idx = torch.argsort(pred_scores, descending=True)
-                pred_boxes = pred_boxes[idx][:K]
-
-                if len(pred_boxes) == 0:
-                    recalls.append(0.0)
-                    continue
-
-                # IoU matrix
-                ious = box_iou(pred_boxes, tgt_boxes)
-
-                # Compute recall at each IoU threshold
-                image_recalls = []
-                for thr in self.iou_thresholds:
-                    matched = (ious >= thr).any(dim=0).float()
-                    recall = matched.sum().item() / len(tgt_boxes)
-                    image_recalls.append(recall)
-
-                # Average recall over IoU thresholds
-                recalls.append(sum(image_recalls) / len(image_recalls))
-
-            # Average recall over dataset
-            results[f"mar_{K}"] = sum(recalls) / len(recalls)
-
-        return results
-
-class SemanticLabelMapper:
-    def __init__(self, class_names, model_name="sentence-transformers/all-MiniLM-L6-v2", threshold=0.55):
-        """
-        class_names: list of canonical GT class names, e.g. ["remote", "laptop", "keyboard"]
-        threshold: minimum similarity required to consider a match
-        """
-        self.class_names = class_names
-        self.threshold = threshold
-
-        # Load embedding model
-        self.model = SentenceTransformer(model_name)
-
-        # Precompute embeddings for GT classes
-        self.class_emb = self.model.encode(class_names, convert_to_tensor=True)
-
-        # Build ID mapping
-        self.class_to_id = {name: idx for idx, name in enumerate(class_names)}
-
-    def map(self, predicted_label):
-        """
-        Returns integer class ID for a predicted text label.
-        Uses semantic similarity to find the closest GT class.
-        """
-        if not isinstance(predicted_label, str) or not predicted_label.strip():
-            return (-1, 0.0)  # missing/empty label -> no class
-        pred_emb = self.model.encode(predicted_label, convert_to_tensor=True)
-
-        # Compute cosine similarity
-        sim = torch.nn.functional.cosine_similarity(pred_emb, self.class_emb)
-
-        # Find best match
-        best_idx = torch.argmax(sim).item()
-        best_score = sim[best_idx].item()
-
-        if best_score < self.threshold:
-            # No good match → treat as unknown class
-            return (-1, 0.0)
-
-        return [best_idx, best_score]
-
-    def map_batch(self, predicted_labels):
-        """
-        Map a list of predicted labels to integer IDs.
-        """
-        return [self.map(lbl) for lbl in predicted_labels]
-
-class Evaluator:
-    cache_export = {}
-    semantic_model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
-    def __init__(self, proximity_metric='iou', semantic_threshold=0.5, semantic_model_name="sentence-transformers/all-MiniLM-L6-v2", normalized_box=True, run_once=True,
-                 matching=None, semantic_weight=None, compute_detection_metrics=None):
-        # mAP / mAR etc.: None -> follow the COMPUTE_DETECTION_METRICS flag
-        self.detection_metrics = (
-            COMPUTE_DETECTION_METRICS if compute_detection_metrics is None else compute_detection_metrics
-        )
-        self.matching = (matching or MATCHING_METHOD).lower()
-        if self.matching not in ("hungarian", "greedy"):
-            raise ValueError(f"Unknown matching method: {self.matching}")
-        self.semantic_weight = SEMANTIC_WEIGHT if semantic_weight is None else semantic_weight
-        self.proximity_metric = proximity_metric
-        proximity_threshold_dict = {'iou-10': 0.1,'iou-20': 0.2,'iou-30': 0.3,'iou-40': 0.4,'iou-50': 0.5,
-                                    'iou-60': 0.6,'iou-70': 0.7,'iou-80': 0.8,'iou-90': 0.9,
-                                    'iou': 0.5,'iou-min': 0.1,'iou-max': 0.9,
-                                    'centerdist': 800,'centerdist-min': 0,'centerdist-max': 1000,'centerdist-threshold': 100,
-                                    'centerdist-100': 100, 'centerdist-200':200, 'centerdist-400':400, 'centerdist-600':600, 'centerdist-800':800,
-                                }
-        self.proximity_threshold = proximity_threshold_dict[self.proximity_metric]
-        self.semantic_model = SentenceTransformer(semantic_model_name)
-        self.semantic_model_name = semantic_model_name
-        self.semantic_threshold=semantic_threshold
-        self.normalized_box = normalized_box
-        self.run_once = run_once
-        
-    
-    @staticmethod
-    @lru_cache(maxsize=10000)
-    def _cached_similarity(text1, text2):
-        emb1 = Evaluator.semantic_model.encode(text1, convert_to_tensor=True)
-        emb2 = Evaluator.semantic_model.encode(text2, convert_to_tensor=True)
-        similarity = util.cos_sim(emb1, emb2).item()
-
-        result = similarity
-
-        # store raw inputs + output for export
-        Evaluator.cache_export[(text1, text2)] = {
-            "text1": text1,
-            "text2": text2,
-            "similarity": result,
-        }
-        return result
-    
-    def get_similarity_cache(self):
-        df = pd.DataFrame(Evaluator.cache_export.values())
-        df['Pipeline'] = self.pipeline
-        return df
-
-
-    def iou(self, boxA, boxB):
-        xA = max(boxA[0], boxB[0])
-        yA = max(boxA[1], boxB[1])
-        xB = min(boxA[2], boxB[2])
-        yB = min(boxA[3], boxB[3])
-        inter_w = max(0, xB - xA)
-        inter_h = max(0, yB - yA)
-        inter_area = inter_w * inter_h
-        areaA = (boxA[2] - boxA[0]) * (boxA[3] - boxA[1])
-        areaB = (boxB[2] - boxB[0]) * (boxB[3] - boxB[1])
-        union = areaA + areaB - inter_area
-        ref_area = union
-        return inter_area / ref_area if ref_area > 0 else 0.0
-
-    @staticmethod
-    def centerdist(boxA, boxB):
-        # boxA and boxB are [x_min, y_min, x_max, y_max]
-        ax = (boxA[0] + boxA[2]) / 2
-        ay = (boxA[1] + boxA[3]) / 2
-        bx = (boxB[0] + boxB[2]) / 2
-        by = (boxB[1] + boxB[3]) / 2
-        return math.sqrt((ax - bx)**2 + (ay - by)**2)
-
-    # # Wrap only the expensive part: computing similarity
-    # @lru_cache(maxsize=50000)
-    # def _cached_similarity(self, text1, text2, threshold):
-    #     emb1 = self.semantic_model.encode(text1, convert_to_tensor=True)
-    #     emb2 = self.semantic_model.encode(text2, convert_to_tensor=True)
-    #     similarity = util.cos_sim(emb1, emb2).item()
-    #     return similarity >= threshold, similarity
-
-    
-    def open_image(self, path):
-        return _open_image_cached(path)
-
-    def are_semantically_similar(self, text1, text2, threshold=0.5):
-        # text_ls = [text1.lower(), text2.lower()]
-        # text_ls = sorted(text_ls)
-        # text1, text2 = text_ls
-        # A missing or empty label (e.g. "unlabelled" from majority voting) never
-        # matches; such predictions are also left out of the false positives.
-        if not isinstance(text1, str) or not isinstance(text2, str) or not text1.strip() or not text2.strip():
-            return (False, 0.0)
-        similarity = Evaluator._cached_similarity(text1, text2)
-        return (similarity >= threshold, similarity)
-
-    def enhance_sets(self, tup):
-        set1, set2 = tup
-        SET1 = set()
-        for s1 in set1:
-            similar_item = s1
-            for s2 in set2:
-                if self.are_semantically_similar(s1,s2):
-                    similar_item = s2
-                    break
-            SET1.add(similar_item)
-        return (SET1,set2)
-
-    def get_info(self, element_path):
-        elements = json.load(open(element_path))
-        icons = [i for i in elements if i['element_type']=='Icon']
-        if not icons:  # e.g. a real image on which a pipeline detected nothing
-            return pd.DataFrame({key: [] for key in ["represents", "bounding_box", "element_type"]})
-        sample = icons[0]
-        out_dict = {key:[] for key in sample.keys()}
-        for element in elements:
-            for key in out_dict.keys():
-                info = element[key] if key in element else None
-                out_dict[key].append(info)
-        return pd.DataFrame(out_dict)
-
-    def is_element_match(self, rowA, rowB, consider_proximity):
-        """
-        Returns True if:
-        1. dictA['represents'] and dictB['represents'] are semantically similar
-        2. IoU(dictA['bounding_box'], dictB['bounding_box']) >= iou_threshold
-        """
-        repA = rowA["represents"]
-        repB = rowB["represents"]
-        boxA = rowA["reconst_bounding_box"] if self.normalized_box else rowA['bounding_box']
-        boxB = rowB["bounding_box"]
-
-        if rowA['element_type'] != rowB['element_type']:
-            return False #Because you cannot compare icons and scenes
-        if rowA['element_type'] == 'Icon':
-            semantically_similar, sem_score = self.are_semantically_similar(repA, repB, threshold=self.semantic_threshold)
-            if not semantically_similar:
-                return False
-        if self.proximity_metric.startswith('iou'): 
-            proximity = self.iou(boxA, boxB)
-            if consider_proximity:
-                if proximity < self.proximity_threshold:
-                    return False
-        elif self.proximity_metric.startswith('center'):
-            proximity = Evaluator.centerdist(tuple(boxA), tuple(boxB))
-            if consider_proximity:
-                if proximity >= self.proximity_threshold:
-                    return False
-        return True
-
-    # def is_element_match(self, rowA, rowB, consider_proximity):
-    #     """
-    #     Returns (is_match: bool, score: float).
-    #     score is used to rank multiple valid candidates for the same
-    #     prediction so we can pick the single best GT to match against.
-    #     Higher score = better match.
-    #     """
-    #     repA = rowA["represents"]
-    #     repB = rowB["represents"]
-    #     boxA = rowA["reconst_bounding_box"] if self.normalized_box else rowA['bounding_box']
-    #     boxB = rowB["bounding_box"]
-    
-    #     if rowA['element_type'] != rowB['element_type']:
-    #         return False, 0.0  # cannot compare icons and scenes
-    
-    #     sem_score = 1.0  # default for element types that don't use semantic matching
-    #     if rowA['element_type'] == 'Icon':
-    #         sem_ok, sem_score = self.are_semantically_similar(
-    #             repA, repB, threshold=self.semantic_threshold
-    #         )
-    #         if not sem_ok:
-    #             return False, 0.0
-    
-    #     if not consider_proximity:
-    #         # semantic-only matching, proximity not part of the gate or score
-    #         return True, sem_score
-    
-    #     if self.proximity_metric.startswith('iou'):
-    #         proximity = self.iou(boxA, boxB)
-    #         if proximity < self.proximity_threshold:
-    #             return False, 0.0
-    #         # higher IoU + higher semantic similarity = better match
-    #         score = 0.5 * sem_score + 0.5 * proximity
-    
-    #     elif self.proximity_metric.startswith('center'):
-    #         proximity = Evaluator.centerdist(tuple(boxA), tuple(boxB))
-    #         # FIX: threshold is a MAX allowed distance; smaller distance is
-    #         # better. Reject when the boxes are too far apart, not too close.
-    #         if proximity > self.proximity_threshold:
-    #             return False, 0.0
-    #         # convert distance to a 0..1 "closeness" score so it combines
-    #         # sensibly with sem_score for ranking candidates
-    #         closeness = 1.0 - (proximity / self.proximity_threshold)
-    #         score = 0.5 * sem_score + 0.5 * closeness
-    
-    #     else:
-    #         raise ValueError(f"Unknown proximity_metric: {self.proximity_metric}")
-    
-    #     return True, score
-
-
-
-    
-    def get_pred_path(self, pipeline_name, fname):
-        # s02 writes predictions to 02_detected_picture_elements/<pipeline>/<folder>/
-        pred_dir = os.path.join(DETECTIONS_ROOT, pipeline_name, os.path.basename(os.path.normpath(self.data_dir)))
-        pred_path1 = os.path.join(pred_dir, fname.replace("_gt.json", "_detected.json"))
-        pred_path2 = os.path.join(pred_dir, fname.replace("_gt", ""))
-        pred_path = pred_path1 if os.path.exists(pred_path1) else pred_path2
-        return pred_path
-
-    def get_matchings(self, pred_df, gt_df, consider_proximity):
-        if self.matching == "hungarian":
-            return self.get_matchings_hungarian(pred_df, gt_df, consider_proximity)
-        return self.get_matchings_greedy(pred_df, gt_df, consider_proximity)
-
-    def match_weight(self, rowA, rowB):
-        """Weight of a (prediction, ground truth) pair, in 0..1:
-        SEMANTIC_WEIGHT * semantic similarity + (1 - SEMANTIC_WEIGHT) * box proximity.
-        Box proximity is the IoU for 'iou*' metrics, and for 'centerdist*' metrics
-        1 - distance / threshold clipped to 0..1 (closer centres -> higher).
-        Returns (weight, semantic_similarity, iou)."""
-        boxA = rowA["reconst_bounding_box"] if self.normalized_box else rowA['bounding_box']
-        boxB = rowB["bounding_box"]
-        if rowA['element_type'] == 'Icon':
-            _, sem = self.are_semantically_similar(rowA["represents"], rowB["represents"], threshold=self.semantic_threshold)
-        else:
-            sem = 1.0  # scenes are not compared by label
-        overlap = self.iou(boxA, boxB)
-        if self.proximity_metric.startswith('center') and self.proximity_threshold > 0:
-            dist = Evaluator.centerdist(tuple(boxA), tuple(boxB))
-            proximity = min(1.0, max(0.0, 1.0 - dist / self.proximity_threshold))
-        else:
-            proximity = overlap
-        weight = self.semantic_weight * sem + (1 - self.semantic_weight) * proximity
-        return weight, sem, overlap
-
-    def get_matchings_hungarian(self, pred_df, gt_df, consider_proximity):
-        """
-        One-to-one optimal matching (Hungarian algorithm).
-
-        1. Gate: a (prediction, GT) pair is a candidate only if is_element_match()
-           accepts it, i.e. same element type, semantic similarity >= semantic_threshold
-           and (when consider_proximity) IoU >= threshold / centre distance < threshold.
-        2. Assign: linear_sum_assignment over the candidates maximises the number of
-           matches first and, among equally many, the summed match_weight().
-        Non-candidate pairs can never become true positives.
-        """
-        gt_df['gt_represents'] = gt_df['represents'].copy()
-        preds = list(pred_df.iterrows())
-        gts = list(gt_df.iterrows())
-        n_p, n_g = len(preds), len(gts)
-
-        # Allowed pairs get cost -(BIG + weight) with weight in 0..1. BIG exceeds the
-        # largest possible total weight (min(n_p, n_g)), so one extra match always
-        # beats any gain in weight: matches are maximised first, the weight second.
-        # Pairs that fail a threshold get cost 0 and are dropped if assigned.
-        BIG = float(min(n_p, n_g) + 1)
-        cost = np.zeros((n_p, n_g))
-        allowed = np.zeros((n_p, n_g), dtype=bool)
-        details = {}
-        for i, (_, pred_row) in enumerate(preds):
-            for j, (_, gt_row) in enumerate(gts):
-                if self.is_element_match(pred_row, gt_row, consider_proximity):
-                    weight, sem, overlap = self.match_weight(pred_row, gt_row)
-                    allowed[i, j] = True
-                    cost[i, j] = -(BIG + weight)
-                    details[(i, j)] = (weight, sem, overlap)
-
-        matched_pred, matched_gt, tp = set(), set(), []
-        self.last_matches = []  # (prediction position, GT position) pairs, used by iou_semantic_mapping()
-        if n_p and n_g and allowed.any():
-            rows, cols = linear_sum_assignment(cost)
-            for i, j in zip(rows, cols):
-                if not allowed[i, j]:
-                    continue
-                pred_row, gt_row = preds[i][1], gts[j][1]
-                merged = pd.concat([pred_row, gt_row.drop(labels=['represents'])], axis=0)
-                weight, sem, overlap = details[(i, j)]
-                merged["match_weight"], merged["match_semantic"], merged["match_iou"] = weight, sem, overlap
-                tp.append(merged.to_frame().T)
-                matched_pred.add(i)
-                matched_gt.add(j)
-                self.last_matches.append((i, j))
-
-        fp = [row.to_frame().T for i, (_, row) in enumerate(preds) if i not in matched_pred and row['represents']]
-        fn = [row.to_frame().T for j, (_, row) in enumerate(gts) if j not in matched_gt]
-        tp_df = pd.concat(tp, ignore_index=True) if len(tp)>0 else pd.DataFrame()
-        fp_df = pd.concat(fp, ignore_index=True) if len(fp)>0 else pd.DataFrame()
-        fn_df = pd.concat(fn, ignore_index=True) if len(fn)>0 else pd.DataFrame()
-        return tp_df, fp_df, fn_df
-
-    def get_matchings_greedy(self, pred_df, gt_df, consider_proximity):
-        tp, fp, fn = [], [], []
-        gt_matched = []
-        self.last_matches = []  # (prediction position, GT position) pairs, used by iou_semantic_mapping()
-        gt_df['gt_represents'] = gt_df['represents'].copy()
-        for pred_pos, (pred_ind, pred_row) in enumerate(pred_df.iterrows()):
-            match_found = False
-            for gt_pos, (gt_ind, gt_row) in enumerate(gt_df.iterrows()):
-                if self.is_element_match(pred_row, gt_row, consider_proximity):
-                    gt_row_filtered = gt_row.drop(labels=['represents'])
-                    merged = pd.concat([pred_row, gt_row_filtered], axis=0)
-                    merged = merged.to_frame().T  # make it a single-row DataFrame
-                    if gt_ind not in gt_matched:
-                        tp.append(merged)
-                        match_found = True
-                        gt_matched.append(gt_ind)
-                        self.last_matches.append((pred_pos, gt_pos))
-                        break
-            if not match_found and pred_row['represents']:
-                fp.append(pred_row.to_frame().T)
-        for gt_ind, gt_row in gt_df.iterrows():
-            if gt_ind not in gt_matched:
-                fn.append(gt_row.to_frame().T)
-
-        tp_df = pd.concat(tp, ignore_index=True) if len(tp)>0 else pd.DataFrame()
-        fp_df = pd.concat(fp, ignore_index=True) if len(fp)>0 else pd.DataFrame()
-        fn_df = pd.concat(fn, ignore_index=True) if len(fn)>0 else pd.DataFrame()
-        return tp_df, fp_df, fn_df
-
-    def iou_semantic_mapping(self, pred_df, gt_df):
-        """
-        One row per prediction and per ground-truth object of the last get_matchings()
-        call, with the IoU and semantic similarity of the pair it maps to:
-          TP  the matched (prediction, GT) pair
-          FP  an unmatched prediction and its closest GT (highest match_weight,
-              thresholds ignored), i.e. the GT it came nearest to matching
-          FN  an unmatched GT and its closest prediction
-        Predictions without a label are skipped (they are not counted as FP either).
-        Objects with no counterpart at all in the image (no GT / no prediction) are
-        left out, since they have no IoU or similarity to plot.
-        """
-        preds = [row for _, row in pred_df.iterrows()]
-        gts = [row for _, row in gt_df.iterrows()]
-        rows = []
-        if not preds or not gts:
-            return pd.DataFrame(rows)
-
-        cache = {}
-
-        def pair(i, j):
-            if (i, j) not in cache:
-                cache[(i, j)] = self.match_weight(preds[i], gts[j])  # (weight, semantic, iou)
-            return cache[(i, j)]
-
-        def add(role, i, j):
-            _, sem, overlap = pair(i, j)
-            rows.append(dict(
-                uid=gts[j].get("uid"), role=role, iou=overlap, semantic_similarity=sem,
-                pred_label=preds[i]["represents"], gt_label=gts[j]["represents"],
-            ))
-
-        matches = getattr(self, "last_matches", [])
-        matched_p = {i for i, _ in matches}
-        matched_g = {j for _, j in matches}
-        labelled = [i for i, p in enumerate(preds) if p["represents"]]
-        for i, j in matches:
-            add("TP", i, j)
-        for i in labelled:
-            if i not in matched_p:
-                add("FP", i, max(range(len(gts)), key=lambda j: pair(i, j)[0]))
-        for j in range(len(gts)):
-            if j not in matched_g and labelled:
-                add("FN", max(labelled, key=lambda i: pair(i, j)[0]), j)
-        return pd.DataFrame(rows)
-
-    def compute_detection_metrics(self, GT_DF, PRED_DF):
-        """COCO-style mAP / mAR over all evaluated images (torchmetrics).
-        Labels are mapped to GT class ids by semantic similarity; the similarity
-        is used as the detection score. Only runs when COMPUTE_DETECTION_METRICS
-        (or compute_detection_metrics=True) is set."""
-        from torchmetrics.detection import MeanAveragePrecision
-
-        def boxes_tensor(boxes):
-            # shape (N, 4) also when N == 0 (an image whose predictions were all dropped)
-            return torch.tensor(boxes, dtype=torch.float32).reshape(-1, 4)
-
-        gt_classes = GT_DF.represents.unique()
-        mapper = SemanticLabelMapper(gt_classes,threshold=self.semantic_threshold, model_name=self.semantic_model_name)
-        image_ids = GT_DF.uid.unique()
-        preds = []
-        target = []
-        for image_id in image_ids:
-            gt_rows = GT_DF[GT_DF.uid == image_id]
-            pred_rows = PRED_DF[PRED_DF.uid==image_id]
-            gt_ids_sims = mapper.map_batch(gt_rows['represents'])
-            pred_ids_sims = mapper.map_batch(pred_rows['represents'])
-            gt_ids = [k[0] for k in gt_ids_sims]
-
-            pred_ids = [k[0] for k in pred_ids_sims]
-            pred_sims = [k[1] for k in pred_ids_sims]
-            pred_bboxes = pred_rows['reconst_bounding_box'].tolist()
-
-            # Drop predictions whose label matches no GT class (the mapper returns
-            # id -1 when the best similarity is below the semantic threshold).
-            pred_ids_filt, pred_sims_filt, pred_bbox_filt = [],[],[]
-            for (pi, ps, bb) in zip(pred_ids, pred_sims, pred_bboxes):
-                if pi is not None and pi >= 0:
-                    pred_ids_filt.append(pi)
-                    pred_sims_filt.append(ps)
-                    pred_bbox_filt.append(bb)
-
-            image_dict_pred = dict( boxes = boxes_tensor(pred_bbox_filt),
-                                    scores = torch.tensor(pred_sims_filt, dtype=torch.float32),
-                                    labels = torch.tensor(pred_ids_filt, dtype=torch.int64))
-            image_dict_gt =  dict( boxes = boxes_tensor(gt_rows['bounding_box'].tolist()),
-                                    labels = torch.tensor(gt_ids, dtype=torch.int64))
-            preds.append(image_dict_pred)
-            target.append(image_dict_gt)
-        map_metric = MeanAveragePrecision(iou_type="bbox", box_format="xyxy", iou_thresholds=[0.30, 0.40, 0.50, 0.60, 0.70])
-        map_metric.update(preds, target)
-        result_map = map_metric.compute()
-        return pd.DataFrame({"metric":result_map.keys(), "value":[t.item() if (t.ndim == 0) else t.tolist() for t in result_map.values()]})
-
-    def get_metrics(self, tp_df,fp_df,fn_df):
-        tp = len(tp_df)
-        fp = len(fp_df)
-        fn = len(fn_df)
-        try:
-            precision = (tp / (tp + fp))
-        except:
-            precision = -1
-        try:
-            recall = (tp / (tp + fn))
-        except: 
-            recall = -1
-        return tp, fp, fn, precision, recall
-
-    def get_summary(self, result_df):
-        summary_dict = {'metric':[], 'value':[]}
-        for key, df in result_df.items():
-            prefix = "not " if not key else ""
-
-            for metric in ['precision', 'recall']:
-                summary_dict["metric"].append(f"{prefix}considering bbox mean. {metric}")
-                # -1 marks an undefined per-image value (precision with no predictions,
-                # recall with no ground truth); leave those images out of the mean.
-                valid = df[metric][df[metric] >= 0]
-                summary_dict["value"].append(valid.mean() if len(valid) else -1)
-            #----
-            tp_sum, fp_sum, fn_sum = df['tp'].sum(), df['fp'].sum(), df['fn'].sum()
-            summary_dict["metric"].append(f"{prefix}considering bbox dataset precision") 
-            summary_dict["value"].append(tp_sum / (tp_sum + fp_sum) if (tp_sum + fp_sum) > 0 else -1)
-            #----
-            summary_dict["metric"].append(f"{prefix}considering bbox dataset recall")
-            summary_dict["value"].append(tp_sum / (tp_sum + fn_sum) if (tp_sum + fn_sum) > 0 else -1)
-
-            # summary_dict["metric"].append("")
-            # summary_dict["value"].append(len(df['']))
-        
-        summary_df = pd.DataFrame(summary_dict)
-        return summary_df
-
-    def visualize_image(self, image_path, gt_df, tp_df, fp_df, fn_df, save_path):
-        """
-        Draws:
-        - GT boxes in YELLOW
-        - TP boxes in GREEN
-        - FP boxes in RED
-        - FN boxes in ORANGE
-        """
-
-        img = self.open_image(image_path).convert("RGB")
-        draw = ImageDraw.Draw(img)
-
-        # Colors
-        COLOR_GT = (255, 255, 0)     # yellow
-        COLOR_TP = (0, 255, 0)       # green
-        COLOR_FP = (255, 0, 0)       # red
-        COLOR_FN = (255, 165, 0)     # orange
-        # Helper to draw boxes
-        def draw_box(row, color, tag):
-            box = row["reconst_bounding_box"] if "reconst_bounding_box" in row else row["bounding_box"]
-            x1, y1, x2, y2 = box
-
-            # FN gets thicker line
-            line_width = 3
-            # 5 if tag == "FN" else 3
-            offset = 10 if (tag in ("TP","FP")) else 0
-
-            draw.rectangle([x1, y1, x2, y2], outline=color, width=line_width)
-
-            draw.text((x1, y1+offset), f"{tag}: {row['represents']}", fill=color)
-
-        # Draw GT
-        for _, row in gt_df.iterrows():
-            draw_box(row, COLOR_GT, "GT")
-
-        # Draw TP
-        for _, row in tp_df.iterrows():
-            draw_box(row, COLOR_TP, "TP")
-
-        # Draw FP
-        for _, row in fp_df.iterrows():
-            draw_box(row, COLOR_FP, "FP")
-
-        # Draw FN
-        for _, row in fn_df.iterrows():
-            draw_box(row, COLOR_FN, "FN")
-
-        img.save(save_path)
-
-
-    def evaluate(self, data_dir, pipeline_name, ref_path, target_element_type = 'Icon', normalized_box=False,):
-        global SUPER_SUMMARY
-        self.pipeline = pipeline_name
-        self.data_dir = data_dir
-        self.out_mega_folder = f"{EVALUATION_ROOT}/{pipeline_name}"
-        if USE_REAL_DATA:  # one result set per real-data folder, so folders don't overwrite each other
-            self.out_mega_folder = f"{EVALUATION_ROOT}/{pipeline_name}/{os.path.basename(os.path.normpath(data_dir))}"
-        result_dict = {}
-        result_df = {}
-        tp_dfs = {True:[], False:[]}
-        fp_dfs = {True:[], False:[]}
-        fn_dfs = {True:[], False:[]}
-        mapping_dfs = []  # IoU / semantic similarity per prediction and GT (with-bbox matching)
-        GT_DF = pd.DataFrame()
-        PRED_DF = pd.DataFrame()
-        
-        json_files = sorted([f for f in os.listdir(data_dir) if f.endswith(".json")])
-        evaluated_any = False
-
-        json_files = [f for f in json_files if f.endswith("_gt.json")]
-        if ref_path:  # optionally restrict to images that also exist in a reference pipeline
-            ref_files = glob(ref_path)
-            json_ref_files = [os.path.basename(full_path)[:-len('_detected.json')] for full_path in ref_files]
-            json_files = [i for i in json_files if i[:-len('_gt.json')] in json_ref_files]
-
-        for fname in tqdm(json_files):
-            if (not fname.endswith(".json")) or ("data_summary" in fname):
-                continue
-            # print(f"evaluating {fname}")
-            base = fname.replace(".json", "")
-            gt_path = os.path.join(data_dir, f"{base}.json")
-            pred_path = self.get_pred_path(pipeline_name, fname)
-
-            if not os.path.exists(gt_path):
-                print(f"Missing GT for {base}, skipping")
-                continue
-            if not os.path.exists(pred_path):
-                print(f"Missing predictions for {base}, skipping {pred_path}")
-                continue
-            evaluated_any = True
-            
-            id = f"{data_dir}/{fname}"
-            
-            gt_df = self.get_info(gt_path)
-            gt_df['uid'] = id
-            gt_df = gt_df[gt_df.element_type == target_element_type]
-            if len(GT_DF) == 0:
-                GT_DF = gt_df
-            else:
-                GT_DF = pd.concat([GT_DF,gt_df])
-
-            pred_df = self.get_info(pred_path)
-            pred_df['uid'] = id
-            pred_df = pred_df[pred_df.element_type == target_element_type]
-
-            if normalized_box:
-                input_image = self.open_image(gt_path.replace("_gt.json",".png"))
-                width, height = input_image.size
-                # Predictions are in the frame of the image the pipeline processed. New
-                # results store its size in "image_size"; older ones were always 1000 px wide.
-                def _reconstruct(row):
-                    size = row.get('image_size') if 'image_size' in row else None
-                    pred_width = size[0] if isinstance(size, (list, tuple)) and size else 1000
-                    factor = width / pred_width
-                    return [int(i * factor) for i in row['bounding_box']]
-                pred_df['reconst_bounding_box'] = pred_df.apply(_reconstruct, axis=1) if len(pred_df) else pred_df.get('bounding_box', [])
-
-            if len(PRED_DF) == 0:
-                PRED_DF = pred_df
-            else:
-                PRED_DF = pd.concat([PRED_DF,pred_df])
-            
-
-            #Icons
-            for consider_proximity in [True, False]:
-                tp_df,fp_df,fn_df = self.get_matchings(pred_df, gt_df, consider_proximity=consider_proximity)
-                if consider_proximity:
-                    mapping_dfs.append(self.iou_semantic_mapping(pred_df, gt_df))
-
-                vis_out_folder = f"{self.out_mega_folder}/annotated_images{'' if self.matching == 'greedy' else '_' + self.matching}/{'with_bbox' if consider_proximity else 'no_bbox'}"
-                os.makedirs(vis_out_folder, exist_ok=True)
-                image_path = gt_path.replace("_gt.json", ".png")
-                save_path = f"{vis_out_folder}/{fname.replace('.json', '')}.png"
-
-                self.visualize_image(
-                    image_path=image_path,
-                    gt_df=gt_df,
-                    tp_df=tp_df,
-                    fp_df=fp_df,
-                    fn_df=fn_df,
-                    save_path=save_path
-                )
-                                
-                tp, fp, fn, precision, recall = self.get_metrics(tp_df,fp_df,fn_df)
-                for k,v in {'image':fname, 'tp':tp, 'fp':fp, 'fn':fn, 'precision':precision, 'recall':recall}.items():
-                    if consider_proximity not in result_dict:
-                        result_dict[consider_proximity] = {}
-                    if k not in result_dict[consider_proximity]:
-                        result_dict[consider_proximity][k] = []
-                    result_dict[consider_proximity][k].append(v)
-                tp_dfs[consider_proximity].append(tp_df)
-                fp_dfs[consider_proximity].append(fp_df)
-                fn_dfs[consider_proximity].append(fn_df)
-        
-
-        if not evaluated_any:
-            print(f"No ground-truth/prediction pairs for pipeline {pipeline_name} in {data_dir}, skipping")
-            return None, None
-
-        ##### optional COCO-style metrics (mAP, mAR, ...)
-        result_map_df = self.compute_detection_metrics(GT_DF, PRED_DF) if self.detection_metrics else None
-
-        #################################
-        for consider_proximity in [True, False]:
-            result_df[consider_proximity] = pd.DataFrame(result_dict[consider_proximity])
-        
-        matching_tag = "" if self.matching == "greedy" else f"_{self.matching}"
-        out_folder = f"{self.out_mega_folder}/{self.proximity_metric}_sim-{self.semantic_threshold}{matching_tag}/{target_element_type}"
-        os.makedirs(out_folder, exist_ok=True)
-        out_path = f"{out_folder}/results.xlsx"
-        
-
-        if self.run_once:
-            with pd.ExcelWriter(f"{self.out_mega_folder}/Pred-GT.xlsx", engine="openpyxl") as writer:
-                GT_DF.to_excel(writer, sheet_name=f"Gt", index=False)
-                PRED_DF.to_excel(writer, sheet_name=f"Pred", index=False)
-        
-        with pd.ExcelWriter(out_path, engine="openpyxl") as writer:
-            for consider_proximity in [True, False]:
-                RES_DF = result_df[consider_proximity]
-                TP_DF = pd.concat(tp_dfs[consider_proximity])
-                FP_DF = pd.concat(fp_dfs[consider_proximity])
-                FN_DF = pd.concat(fn_dfs[consider_proximity])
-                suffix = ' no bbox' if not consider_proximity else ' with bbox'
-                
-                TP_DF.to_excel(writer, sheet_name=f"True Positives {suffix}", index=False)
-                FP_DF.to_excel(writer, sheet_name=f"False Positives {suffix}", index=False)
-                FN_DF.to_excel(writer, sheet_name=f"False Negatives {suffix}", index=False)
-                RES_DF.to_excel(writer, sheet_name=f"Result {suffix}", index=False)
-            
-            summary_df = self.get_summary(result_df)
-            if result_map_df is not None:
-                summary_df = pd.concat([summary_df, result_map_df])
-            summary_df.to_excel(writer, sheet_name=f"Result summary", index=False)
-            MAPPING_DF = pd.concat(mapping_dfs, ignore_index=True) if mapping_dfs else pd.DataFrame()
-            MAPPING_DF.to_excel(writer, sheet_name="IoU-semantic mapping", index=False)
-        print(f"Saved detailed results to {out_path}")
-
-        plot_path = plot_iou_semantic_mapping(
-            MAPPING_DF,
-            semantic_threshold=self.semantic_threshold,
-            iou_threshold=self.proximity_threshold if self.proximity_metric.startswith("iou") else None,
-            title=f"{pipeline_name} | {self.proximity_metric} | similarity {self.semantic_threshold:g} | {self.matching}",
-            out_path=f"{out_folder}/iou_semantic_mapping.png",
-        )
-        print(f"Saved IoU / semantic similarity plot to {plot_path}")
-        
-        for consider_proximity in [True, False]:
-            FP_DF = pd.concat(fp_dfs[consider_proximity])
-            FN_DF = pd.concat(fn_dfs[consider_proximity])
-            suffix = ' no bbox' if not consider_proximity else ' with bbox'
-            vis_df = fp_dfs[consider_proximity]
-            for type_error in ['fp', 'fn']:
-                vis_df = FP_DF if type_error == 'fp' else FN_DF
-                out_folder_image = f"{out_folder}/sample_labels/{type_error} {suffix}"
-                os.makedirs(out_folder_image, exist_ok=True)
-                for ind, row in vis_df.iterrows():
-                    input_image_path = row['uid'].replace('_gt.json','.png')
-                    img = self.open_image(input_image_path)
-                    bbox = row["reconst_bounding_box"] if type_error == 'fp' else row["bounding_box"]
-                    label= row["represents"].replace('/','-slash-')
-                    bbox_str = "-".join([str(i) for i in bbox])
-                    img_cropped = img.crop(bbox)
-                    # img_cropped.save(f"{out_folder_image}/{input_image_path.split('/')[-1].replace('.png','-' + label + '-' + bbox_str)}.png")
-        similarity_cache = self.get_similarity_cache()
-        
-        return summary_df, similarity_cache
-
-
-if __name__ == "__main__":
-    TEST = True
-    DATA_DIRS = [p for p in glob(f"{DATA_ROOT}/*") if os.path.isdir(p)]
-    # PIPELINES = ["kde_scene_kde_icon_clip_icons","llm_gemma4-latest_icons","llm_gemma4-31b_icons","kde_scene_llm_gemma4-latest_icons","kde_scene_llm_gemma4-31b_icons","kde_scene_llm_gemma4-31b_icons_ensemble_verify"]
-    PIPELINES = ["llm_gemma4-31b_icons_rgb_fullres","kde_scene_llm_gemma4-31b_icons_rgb_fullres",]
-    METRICS = ['iou-10','iou-20','iou-30','iou-40','iou-50','iou-60','iou-70','iou-80','iou-90','centerdist-100', 'centerdist-200', 'centerdist-400', 'centerdist-600', 'centerdist-800']
-    SEM_THRESHS = [0.1, 0.2, 0.3, 0.4, 0.5,0.6,0.7,0.8,0.9]
-    SUPER_SUMMARY = pd.DataFrame()
-    SIMILARITY_CACHE = None    
-    REF_PATH = "/home/P103236/projects/paper_sketchobjectdetection/02_detected_picture_elements/kde_scene_llm_gemma4-31b_icons_ensemble_verify/02_to_05_clusters_05_to_20_classes_03_to_05_images_per_class_20_minimum_icons_00_to_00_percent_overlap_00_minimum_overlap_images_3.0_max_scaling_factor/image_*_detected.json"
-
     if USE_REAL_DATA:
-        # Evaluate the pipelines listed in PIPELINES above on the real data
-        REF_PATH = None
-        TEST = False
-        METRICS = ['iou-30']
-        SEM_THRESHS = [0.375]
+        plan = RunPlan(PIPELINES, [PAPER_PROXIMITY_METRIC], [PAPER_SEMANTIC_THRESHOLD], ref_pipeline=None)
+    elif TEST:
+        plan = RunPlan(TEST_PIPELINES, [PAPER_PROXIMITY_METRIC], [PAPER_SEMANTIC_THRESHOLD], ref_pipeline=REF_PIPELINE)
+    else:
+        plan = RunPlan(PIPELINES, PROXIMITY_METRICS, SEMANTIC_THRESHOLDS, ref_pipeline=REF_PIPELINE)
+    plan.summary_dir = EVALUATION_ROOT
 
-    if TEST:
-        PIPELINES = []#["kde_scene_kde_icon_clip_icons","llm_gemma4-latest_icons","llm_gemma4-31b_icons","kde_scene_llm_gemma4-latest_icons","kde_scene_llm_gemma4-31b_icons","kde_scene_llm_gemma4-31b_icons_ensemble_verify","kde_scene_llm_gemma4-31b_icons_ensemble_verify_w_majority","kde_scene_llm_gemma4-31b_icons_ensemble_verify_ignore_big"]
-        for TARGET_MODEL in ["ministral-3:8b","llava:7b", "moondream:1.8b", "llama3.2-vision:latest", "minicpm-v:8b"]:
-            PIPELINES.append(f"kde_scene_llm_gemma4-31b_icons_ensemble_verify_{TARGET_MODEL}_only")
-
-        print(PIPELINES)
-        # PIPELINES = ["kde_scene_llm_gemma4-31b_icons_ensemble_verify"]
-        METRICS = ['iou-30']
-        SEM_THRESHS = [0.375]
-        SUPER_SUMMARY = pd.DataFrame()
-        SIMILARITY_CACHE = None
-
-    SUMMARY_DIR = EVALUATION_ROOT
     if RUN_THRESHOLD_SENSITIVITY:
-        PIPELINES = list(SENSITIVITY_PIPELINES)
-        METRICS = [SENSITIVITY_PROXIMITY]
-        SEM_THRESHS = list(SENSITIVITY_THRESHOLDS)
-        if not any(np.isclose(SEM_THRESHS, SENSITIVITY_REFERENCE)):
-            SEM_THRESHS.append(SENSITIVITY_REFERENCE)
-        SUMMARY_DIR = f"{EVALUATION_ROOT}/threshold_sensitivity"
-        print(f"Threshold sensitivity run: {PIPELINES} | {METRICS} | thresholds {SEM_THRESHS}")
+        thresholds = list(SENSITIVITY_THRESHOLDS)
+        if not any(np.isclose(thresholds, SENSITIVITY_REFERENCE)):
+            thresholds.append(SENSITIVITY_REFERENCE)
+        plan = RunPlan(list(SENSITIVITY_PIPELINES), [SENSITIVITY_PROXIMITY], thresholds,
+                       ref_pipeline=plan.ref_pipeline, summary_dir=f"{EVALUATION_ROOT}/threshold_sensitivity",
+                       sensitivity=True)
+    return plan
 
-    if USE_REAL_DATA:  # checked after the pipeline list is final
-        real_folders = [os.path.basename(d) for d in DATA_DIRS]
-        print(f"Real data: {len(DATA_DIRS)} folder(s), pipelines: {PIPELINES}")
-        for p in PIPELINES:
-            if not any(os.path.isdir(os.path.join(DETECTIONS_ROOT, p, f)) for f in real_folders):
-                print(f"WARNING: no predictions for pipeline '{p}' in {DETECTIONS_ROOT}/{p}/<{'|'.join(real_folders)}> - it will be skipped")
 
-    for pipeline in PIPELINES:
-        run_once = True
-        for METRIC in METRICS:
-            for SEM_THRESH in SEM_THRESHS:
-                evaluator = Evaluator(proximity_metric=METRIC, semantic_threshold = SEM_THRESH, normalized_box=True, run_once=run_once)
-                for target_element in ['Icon']:
-                    print(f"evaluating pipeline {pipeline} | {METRIC} | {SEM_THRESH}")
-                    for data_dir in DATA_DIRS:
-                        summary_df, similarity_cache = evaluator.evaluate(data_dir, pipeline_name=pipeline, ref_path=REF_PATH, normalized_box = True, target_element_type=target_element)
-                        if summary_df is None:
+def report_data_folders(pipelines, data_dirs, ref_pipeline):
+    """Say which data folders will be evaluated and which pipelines (or the
+    reference pipeline) have no predictions for any of them."""
+    folders = [data_folder_name(d) for d in data_dirs]
+    print(f"{len(folders)} data folder(s) in {DATA_ROOT}/: {folders}")
+    for p in list(pipelines) + ([ref_pipeline] if ref_pipeline else []):
+        if not any(os.path.isdir(os.path.join(DETECTIONS_ROOT, p, f)) for f in folders):
+            role = "reference pipeline" if p == ref_pipeline and p not in pipelines else "pipeline"
+            print(f"WARNING: no predictions for {role} '{p}' in {DETECTIONS_ROOT}/{p}/<{'|'.join(folders)}>"
+                  + (" - no images will pass the reference filter" if role == "reference pipeline"
+                     else " - it will be skipped"))
+
+
+def summary_row_name(pipeline, element_type, metric, threshold, method, data_dir):
+    """Row name in super_summary.xlsx: pipeline_element|metric|threshold|method|data folder."""
+    return f"{pipeline}_{element_type}|{metric}|{threshold}|{method}|{data_folder_name(data_dir)}"
+
+
+def evaluate_all(plan, data_dirs, similarity):
+    """Run every pipeline x setting x data folder; returns [(row name, summary DataFrame)]."""
+    summaries = []
+    for pipeline in plan.pipelines:
+        similarity.current_pipeline = pipeline
+        first_setting = True
+        for metric in plan.proximity_metrics:
+            for threshold in plan.semantic_thresholds:
+                matcher = Matcher(similarity, threshold, metric, method=MATCHING_METHOD,
+                                  semantic_weight=SEMANTIC_WEIGHT)
+                evaluator = Evaluator(matcher, DETECTIONS_ROOT, EVALUATION_ROOT,
+                                      write_pred_gt=first_setting,  # predictions/GT are the same for every setting
+                                      detection_metrics=COMPUTE_DETECTION_METRICS)
+                for element_type in ELEMENT_TYPES:
+                    print(f"evaluating pipeline {pipeline} | {metric} | {threshold}")
+                    for data_dir in data_dirs:
+                        summary = evaluator.evaluate(data_dir, pipeline, plan.ref_pipeline, element_type)
+                        if summary is None:
                             continue
-                        if 'metric' not in SUPER_SUMMARY.columns:
-                            SUPER_SUMMARY['metric'] = summary_df['metric'].copy().reset_index(drop=True)
-                        if run_once:
-                            if SIMILARITY_CACHE is None:
-                                SIMILARITY_CACHE = similarity_cache
-                            else:
-                                SIMILARITY_CACHE = pd.concat([SIMILARITY_CACHE, similarity_cache])
-                        row_index = f'{pipeline}_{target_element}|{METRIC}|{SEM_THRESH}|{evaluator.matching}'
-                        if USE_REAL_DATA:
-                            row_index += f'|{os.path.basename(data_dir)}'
-                        summary_df[row_index] = summary_df['value']
-                        SUPER_SUMMARY = pd.concat([SUPER_SUMMARY, summary_df[row_index].reset_index(drop=True)], axis = 1)
+                        name = summary_row_name(pipeline, element_type, metric, threshold, matcher.method, data_dir)
+                        summaries.append((name, summary))
                         print("Evaluation complete\n")
-                run_once = False
-    if SUPER_SUMMARY.empty:
+                first_setting = False
+    return summaries
+
+
+def build_super_summary(summaries):
+    """One row per evaluation ('pipeline' = row name), one column per summary metric."""
+    metric_names = list(summaries[0][1]['metric'])
+    rows = [list(summary['value']) for _, summary in summaries]
+    table = pd.DataFrame(rows, columns=metric_names)
+    table.insert(0, "pipeline", [name for name, _ in summaries])
+    return table
+
+
+def main():
+    plan = select_run_plan()
+    data_dirs = sorted(p for p in glob(f"{DATA_ROOT}/*") if os.path.isdir(p))
+    if plan.sensitivity:
+        print(f"Threshold sensitivity run: {plan.pipelines} | {plan.proximity_metrics} | "
+              f"thresholds {plan.semantic_thresholds}")
+    elif TEST and not USE_REAL_DATA:
+        print(plan.pipelines)
+    report_data_folders(plan.pipelines, data_dirs, plan.ref_pipeline)
+
+    similarity = SemanticSimilarity(SEMANTIC_MODEL)
+    summaries = evaluate_all(plan, data_dirs, similarity)
+    if not summaries:
         raise SystemExit(f"Nothing was evaluated: check {DATA_ROOT}/ and {DETECTIONS_ROOT}/")
-    os.makedirs(SUMMARY_DIR, exist_ok=True)
-    SUPER_SUMMARY = SUPER_SUMMARY.set_index("metric").T.rename_axis("pipeline").reset_index()
-    SUPER_SUMMARY.to_excel(f'{SUMMARY_DIR}/super_summary.xlsx', index=False)
-    if RUN_THRESHOLD_SENSITIVITY:
+
+    os.makedirs(plan.summary_dir, exist_ok=True)
+    super_summary = build_super_summary(summaries)
+    super_summary.to_excel(f"{plan.summary_dir}/super_summary.xlsx", index=False)
+
+    if plan.sensitivity:
         threshold_sensitivity_report(
-            SUPER_SUMMARY, SUMMARY_DIR,
+            super_summary, plan.summary_dir, SENSITIVITY_PIPELINES, SENSITIVITY_METRICS,
+            reference=SENSITIVITY_REFERENCE,
             interval=(min(SENSITIVITY_THRESHOLDS), max(SENSITIVITY_THRESHOLDS)),
         )
     else:
-        # the annotation sample is drawn from this file: only refresh it in normal runs
-        SIMILARITY_CACHE = SIMILARITY_CACHE.drop_duplicates(['text1','text2'])
-        SIMILARITY_CACHE.to_excel(f'{EVALUATION_ROOT}/similarity_cache.xlsx', index=False)
+        # the threshold-annotation sample is drawn from this file: only refresh it in normal runs
+        similarity.cache_frame().to_excel(f"{EVALUATION_ROOT}/similarity_cache.xlsx", index=False)
+
+
+if __name__ == "__main__":
+    main()
