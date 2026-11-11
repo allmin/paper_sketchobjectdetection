@@ -79,6 +79,34 @@ def path(name):
 # Step 1: sample
 # ===========================================================================
 
+def diagnose(info):
+    """Explain why no pairs were found."""
+    print(f"\nDIAGNOSIS (run from: {os.getcwd()})")
+    coverage = pd.DataFrame(info["coverage"])
+    if coverage.empty:
+        print(f"- No data folders with ground truth in {DATA_ROOT}/.")
+    else:
+        print(f"- Ground-truth images per data folder, and how many of them each pipeline has predictions for:")
+        print(coverage.rename(columns={p: n for p, n in PIPELINES.items()}).to_string(index=False))
+        missing = [n for p, n in PIPELINES.items() if coverage[p].sum() == 0]
+        if missing:
+            print(f"- No predictions at all for: {', '.join(missing)}. Only images that ALL pipelines processed "
+                  f"are used, so one missing pipeline leaves nothing. Check the folder names in PIPELINES.")
+    if os.path.isdir(DETECTIONS_ROOT):
+        existing = sorted(d for d in os.listdir(DETECTIONS_ROOT) if os.path.isdir(os.path.join(DETECTIONS_ROOT, d)))
+        print(f"- Pipeline folders that exist in {DETECTIONS_ROOT}/:")
+        for d in existing:
+            batches = sorted(os.listdir(os.path.join(DETECTIONS_ROOT, d)))
+            print(f"    {d}   ({len(batches)} data folder(s): {', '.join(batches[:3])}{' ...' if len(batches) > 3 else ''})")
+    else:
+        print(f"- {DETECTIONS_ROOT}/ does not exist here.")
+    if info["data_folders"]:
+        print(f"- On the {sum(info['data_folders'].values())} images all pipelines processed, "
+              f"{info['overlapping_pairs']} prediction/ground-truth pairs overlap at all; the highest IoU is "
+              f"{info['max_iou']:.3f}. If that is far below {MIN_IOU}, the boxes are probably in different frames "
+              f"(check the predictions' image_size / box format against s03).")
+
+
 def cmd_sample(force=False):
     if os.path.exists(path("label_pairs.csv")) and not force:
         sys.exit(f"{path('label_pairs.csv')} exists already: sampling again would replace the pairs "
@@ -86,7 +114,8 @@ def cmd_sample(force=False):
     os.makedirs(OUT_DIR, exist_ok=True)
     pairs, info = tc.collect_pairs(DATA_ROOT, DETECTIONS_ROOT, PIPELINES, MIN_IOU)
     if pairs.empty:
-        sys.exit(f"No pairs with IoU >= {MIN_IOU} found: check {DATA_ROOT}/, {DETECTIONS_ROOT}/ and PIPELINES")
+        diagnose(info)
+        sys.exit(f"No pairs with IoU >= {MIN_IOU} found - see the diagnosis above.")
     split = tc.split_images(pairs.image_group, TEST_FRACTION, SEED)
     pairs["split"] = pairs.image_group.map(split)
     sampled, shortfalls = tc.sample_pairs(pairs, split, PAIRS_PER_PIPELINE, SEED)

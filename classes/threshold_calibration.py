@@ -57,11 +57,18 @@ def collect_pairs(data_root, detections_root, pipelines, min_iou=0.3, element_ty
     left out (they can never match).
     Returns (pairs DataFrame, info dict).
     """
-    rows, info = [], {"data_folders": {}, "images_missing_a_pipeline": 0}
+    rows = []
+    info = {"data_folders": {}, "images_missing_a_pipeline": 0, "coverage": [], "max_iou": 0.0, "overlapping_pairs": 0}
+    if not os.path.isdir(data_root):
+        raise FileNotFoundError(f"Data folder '{data_root}' not found (run from the project folder?)")
     data_dirs = sorted(p for p in (os.path.join(data_root, d) for d in os.listdir(data_root)) if os.path.isdir(p))
     for data_dir in data_dirs:
         folder = data_folder_name(data_dir)
         gt_names = sorted(f for f in os.listdir(data_dir) if f.endswith("_gt.json"))
+        # how many ground-truth images each pipeline has predictions for (for diagnosing)
+        found = {p: sum(os.path.exists(_prediction_file(detections_root, p, data_dir, g)) for g in gt_names)
+                 for p in pipelines}
+        info["coverage"].append(dict(data_folder=folder, gt_images=len(gt_names), **found))
         common = [g for g in gt_names
                   if all(os.path.exists(_prediction_file(detections_root, p, data_dir, g)) for p in pipelines)]
         info["images_missing_a_pipeline"] += len(gt_names) - len(common)
@@ -81,6 +88,8 @@ def collect_pairs(data_root, detections_root, pipelines, min_iou=0.3, element_ty
                         continue
                     for _, gt in gt_df.iterrows():
                         overlap = iou(pred["reconst_bounding_box"], gt["bounding_box"])
+                        info["max_iou"] = max(info["max_iou"], overlap)
+                        info["overlapping_pairs"] += overlap > 0
                         if overlap >= min_iou:
                             rows.append(dict(
                                 data_folder=folder, image=image, image_group=f"{folder}/{image}",
