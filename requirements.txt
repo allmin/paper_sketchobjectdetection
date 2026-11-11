@@ -13,3 +13,6 @@ scipy
 torchmetrics
 torchvision
 pymupdf
+open_clip_torch
+scikit-learn>=1.0
+streamlit
