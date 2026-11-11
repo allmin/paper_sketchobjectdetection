@@ -111,18 +111,47 @@ class SemanticSimilarity:
 # 3. Loading ground truth and predictions
 # ---------------------------------------------------------------------------
 
+class CorruptJSONError(ValueError):
+    """A ground-truth or prediction file that can't be read as a list of elements."""
+
+    def __init__(self, path, reason):
+        super().__init__(f"{path}: {reason}")
+        self.path, self.reason = path, reason
+
+
 def load_elements(json_path):
     """
     Elements of one image (ground truth or predictions) as a DataFrame, one row
     per element. Columns are the keys of the first Icon; an image without icons
     gives an empty frame with the basic columns.
+    Raises CorruptJSONError if the file is not valid JSON or not a list of
+    elements with an 'element_type' (e.g. empty or cut off while writing).
     """
-    with open(json_path) as f:
-        elements = json.load(f)
-    icons = [e for e in elements if e['element_type'] == 'Icon']
-    if not icons:  # e.g. a real image on which a pipeline detected nothing
-        return pd.DataFrame({key: [] for key in ["represents", "bounding_box", "element_type"]})
-    return pd.DataFrame({key: [e.get(key) for e in elements] for key in icons[0].keys()})
+    try:
+        with open(json_path, encoding="utf-8") as f:
+            elements = json.load(f)
+        if not isinstance(elements, list):
+            raise TypeError(f"expected a list of elements, got {type(elements).__name__}")
+        icons = [e for e in elements if e['element_type'] == 'Icon']
+        if not icons:  # e.g. a real image on which a pipeline detected nothing
+            return pd.DataFrame({key: [] for key in ["represents", "bounding_box", "element_type"]})
+        return pd.DataFrame({key: [e.get(key) for e in elements] for key in icons[0].keys()})
+    except (ValueError, UnicodeDecodeError, KeyError, TypeError, AttributeError) as e:
+        # json.JSONDecodeError is a ValueError; KeyError/TypeError: wrong structure
+        reason = f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
+        raise CorruptJSONError(json_path, reason) from e
+
+
+def report_corrupt_files(failures, out_path=None):
+    """Print the unreadable JSON files ({path: reason}) and optionally save them as CSV."""
+    if not failures:
+        return
+    print(f"\n{len(failures)} JSON file(s) could not be read and their images were skipped:")
+    for path, reason in sorted(failures.items()):
+        print(f"  {path}\n      {reason}")
+    if out_path:
+        pd.DataFrame(sorted(failures.items()), columns=["file", "reason"]).to_csv(out_path, index=False)
+        print(f"List saved to {out_path}")
 
 
 def add_rescaled_boxes(pred_df, image_width):
@@ -412,12 +441,16 @@ class Evaluator:
     batch and every real-data folder has its own results.
     """
 
-    def __init__(self, matcher, detections_root, evaluation_root, write_pred_gt=True, detection_metrics=False):
+    def __init__(self, matcher, detections_root, evaluation_root, write_pred_gt=True, detection_metrics=False,
+                 failures=None):
+        """failures: dict shared across evaluators that collects unreadable JSON
+        files {path: reason}; their images are skipped."""
         self.matcher = matcher
         self.detections_root = detections_root
         self.evaluation_root = evaluation_root
         self.write_pred_gt = write_pred_gt
         self.detection_metrics = detection_metrics
+        self.failures = failures if failures is not None else {}
 
     # -- paths ----------------------------------------------------------------
 
@@ -460,16 +493,22 @@ class Evaluator:
     # -- one image ------------------------------------------------------------
 
     def load_image(self, pipeline, data_dir, gt_name, element_type):
-        """(gt_df, pred_df) of one image, or None when a file is missing."""
+        """(gt_df, pred_df) of one image, or None when a file is missing or unreadable."""
         gt_path = os.path.join(data_dir, gt_name)
         pred_path = self.prediction_path(pipeline, data_dir, gt_name)
         if not os.path.exists(pred_path):
             print(f"Missing predictions for {gt_name[:-len('.json')]}, skipping {pred_path}")
             return None
         uid = f"{data_dir}/{gt_name}"
-        gt_df = load_elements(gt_path).assign(uid=uid)
+        try:
+            gt_df = load_elements(gt_path).assign(uid=uid)
+            pred_df = load_elements(pred_path).assign(uid=uid)
+        except CorruptJSONError as e:
+            if e.path not in self.failures:
+                print(f"Unreadable JSON, skipping image {gt_name[:-len('_gt.json')]}: {e}")
+            self.failures[e.path] = e.reason
+            return None
         gt_df = gt_df[gt_df.element_type == element_type].copy()
-        pred_df = load_elements(pred_path).assign(uid=uid)
         pred_df = pred_df[pred_df.element_type == element_type].copy()
         if self.matcher.use_rescaled_boxes:
             width, _ = open_image(gt_path.replace("_gt.json", ".png")).size

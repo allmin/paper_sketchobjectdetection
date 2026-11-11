@@ -27,7 +27,8 @@ import numpy as np
 import pandas as pd
 from sklearn.metrics import average_precision_score, cohen_kappa_score, precision_recall_curve
 
-from classes.evaluation import add_rescaled_boxes, data_folder_name, iou, load_elements, open_image
+from classes.evaluation import (CorruptJSONError, add_rescaled_boxes, data_folder_name, iou, load_elements,
+                                open_image)
 
 SPLITS = ("train", "test")
 ROLES = ("primary", "second")  # primary annotates everything, second only the agreement subset
@@ -58,7 +59,8 @@ def collect_pairs(data_root, detections_root, pipelines, min_iou=0.3, element_ty
     Returns (pairs DataFrame, info dict).
     """
     rows = []
-    info = {"data_folders": {}, "images_missing_a_pipeline": 0, "coverage": [], "max_iou": 0.0, "overlapping_pairs": 0}
+    info = {"data_folders": {}, "images_missing_a_pipeline": 0, "coverage": [], "max_iou": 0.0, "overlapping_pairs": 0,
+            "failed_files": {}, "images_skipped_corrupt": 0}  # failed_files: {path: reason}
     if not os.path.isdir(data_root):
         raise FileNotFoundError(f"Data folder '{data_root}' not found (run from the project folder?)")
     data_dirs = sorted(p for p in (os.path.join(data_root, d) for d in os.listdir(data_root)) if os.path.isdir(p))
@@ -74,14 +76,23 @@ def collect_pairs(data_root, detections_root, pipelines, min_iou=0.3, element_ty
         info["images_missing_a_pipeline"] += len(gt_names) - len(common)
         if not common:
             continue
-        info["data_folders"][folder] = len(common)
+        used = 0
         for gt_name in common:
             image = gt_name[:-len("_gt.json")]
-            gt_df = load_elements(os.path.join(data_dir, gt_name))
+            # read all files of this image first: if any is unreadable, skip the whole
+            # image so every pipeline still contributes pairs from the same images
+            try:
+                gt_df = load_elements(os.path.join(data_dir, gt_name))
+                preds = {p: load_elements(_prediction_file(detections_root, p, data_dir, gt_name)) for p in pipelines}
+            except CorruptJSONError as e:
+                info["failed_files"][e.path] = e.reason
+                info["images_skipped_corrupt"] += 1
+                continue
+            used += 1
             gt_df = gt_df[gt_df.element_type == element_type]
             width, _ = open_image(os.path.join(data_dir, gt_name).replace("_gt.json", ".png")).size
             for pipeline, name in pipelines.items():
-                pred_df = load_elements(_prediction_file(detections_root, pipeline, data_dir, gt_name))
+                pred_df = preds[pipeline]
                 pred_df = add_rescaled_boxes(pred_df[pred_df.element_type == element_type].copy(), width)
                 for _, pred in pred_df.iterrows():
                     if not normalize_label(pred["represents"]):
@@ -98,6 +109,8 @@ def collect_pairs(data_root, detections_root, pipelines, min_iou=0.3, element_ty
                                 pred_box=list(pred["reconst_bounding_box"]), gt_box=list(gt["bounding_box"]),
                                 identical_labels=normalize_label(pred["represents"]) == normalize_label(gt["represents"]),
                             ))
+        if used:
+            info["data_folders"][folder] = used
     return pd.DataFrame(rows), info
 
 

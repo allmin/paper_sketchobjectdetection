@@ -21,7 +21,7 @@ from glob import glob
 import numpy as np
 import pandas as pd
 
-from classes.evaluation import Evaluator, Matcher, SemanticSimilarity, data_folder_name
+from classes.evaluation import Evaluator, Matcher, SemanticSimilarity, data_folder_name, report_corrupt_files
 from classes.evaluation_plots import threshold_sensitivity_report
 
 # ===========================================================================
@@ -166,8 +166,9 @@ def summary_row_name(pipeline, element_type, metric, threshold, method, data_dir
     return f"{pipeline}_{element_type}|{metric}|{threshold}|{method}|{data_folder_name(data_dir)}"
 
 
-def evaluate_all(plan, data_dirs, similarity):
-    """Run every pipeline x setting x data folder; returns [(row name, summary DataFrame)]."""
+def evaluate_all(plan, data_dirs, similarity, failures):
+    """Run every pipeline x setting x data folder; returns [(row name, summary DataFrame)].
+    Unreadable JSON files are collected in `failures` ({path: reason}) and their images skipped."""
     summaries = []
     for pipeline in plan.pipelines:
         similarity.current_pipeline = pipeline
@@ -178,7 +179,8 @@ def evaluate_all(plan, data_dirs, similarity):
                                   semantic_weight=SEMANTIC_WEIGHT)
                 evaluator = Evaluator(matcher, DETECTIONS_ROOT, EVALUATION_ROOT,
                                       write_pred_gt=first_setting,  # predictions/GT are the same for every setting
-                                      detection_metrics=COMPUTE_DETECTION_METRICS)
+                                      detection_metrics=COMPUTE_DETECTION_METRICS,
+                                      failures=failures)
                 for element_type in ELEMENT_TYPES:
                     print(f"evaluating pipeline {pipeline} | {metric} | {threshold}")
                     for data_dir in data_dirs:
@@ -212,11 +214,13 @@ def main():
     report_data_folders(plan.pipelines, data_dirs, plan.ref_pipeline)
 
     similarity = SemanticSimilarity(SEMANTIC_MODEL)
-    summaries = evaluate_all(plan, data_dirs, similarity)
+    failures = {}
+    summaries = evaluate_all(plan, data_dirs, similarity, failures)
+    os.makedirs(plan.summary_dir, exist_ok=True)
     if not summaries:
+        report_corrupt_files(failures, f"{plan.summary_dir}/failed_json.csv")
         raise SystemExit(f"Nothing was evaluated: check {DATA_ROOT}/ and {DETECTIONS_ROOT}/")
 
-    os.makedirs(plan.summary_dir, exist_ok=True)
     super_summary = build_super_summary(summaries)
     super_summary.to_excel(f"{plan.summary_dir}/super_summary.xlsx", index=False)
 
@@ -229,6 +233,7 @@ def main():
     else:
         # the threshold-annotation sample is drawn from this file: only refresh it in normal runs
         similarity.cache_frame().to_excel(f"{EVALUATION_ROOT}/similarity_cache.xlsx", index=False)
+    report_corrupt_files(failures, f"{plan.summary_dir}/failed_json.csv")
 
 
 if __name__ == "__main__":

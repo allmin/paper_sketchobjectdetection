@@ -34,6 +34,7 @@ import numpy as np
 import pandas as pd
 
 from classes import threshold_calibration as tc
+from classes.evaluation import report_corrupt_files
 
 # ===========================================================================
 # SETTINGS (fix these before sampling)
@@ -115,6 +116,7 @@ def cmd_sample(force=False):
     pairs, info = tc.collect_pairs(DATA_ROOT, DETECTIONS_ROOT, PIPELINES, MIN_IOU)
     if pairs.empty:
         diagnose(info)
+        report_corrupt_files(info["failed_files"], path("failed_json.csv"))
         sys.exit(f"No pairs with IoU >= {MIN_IOU} found - see the diagnosis above.")
     split = tc.split_images(pairs.image_group, TEST_FRACTION, SEED)
     pairs["split"] = pairs.image_group.map(split)
@@ -130,7 +132,8 @@ def cmd_sample(force=False):
         json.dump(SETTINGS, f, indent=2)
 
     print(f"Images per data folder (processed by all {len(PIPELINES)} pipelines): {info['data_folders']}"
-          f"; skipped {info['images_missing_a_pipeline']} image(s) missing a pipeline")
+          f"; skipped {info['images_missing_a_pipeline']} image(s) missing a pipeline"
+          f" and {info['images_skipped_corrupt']} with an unreadable JSON file")
     print(f"Images: {sum(v == 'train' for v in split.values())} train, {sum(v == 'test' for v in split.values())} test")
     print(f"Pairs with IoU >= {MIN_IOU}: {len(pairs)} ({int(pairs.identical_labels.sum())} with identical labels, "
           f"left out of sampling)")
@@ -139,6 +142,7 @@ def cmd_sample(force=False):
         print("NOTE:", s)
     print(f"{len(label_pairs)} unique label pairs to annotate ({int(label_pairs.agreement_subset.sum())} also for the "
           f"second annotator). Next: annotate in the app, then run 'train'.")
+    report_corrupt_files(info["failed_files"], path("failed_json.csv"))
 
 
 # ===========================================================================
