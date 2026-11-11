@@ -51,7 +51,7 @@ SEMANTIC_THRESHOLDS = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
 # Only evaluate the images this reference pipeline also has predictions for, in
 # the same data folder (so all pipelines are compared on the same images).
 # None = all images. Not used on real data.
-REF_PIPELINE = "kde_scene_llm_gemma4-31b_icons_ensemble_verify"
+REF_PIPELINE = "kde_scene_llm_gemma4-31b_icons_ensemble_verify_ignore_big_rgb_fullres"
 
 # Quick run (synthetic data only): TEST_PIPELINES at the paper setting.
 TEST = True
@@ -64,12 +64,12 @@ PAPER_SEMANTIC_THRESHOLD = 0.375
 
 # Pipelines in the paper's table: folder -> name used in the paper.
 PAPER_PIPELINES = {
-    "kde_scene_kde_icon_clip_icons": "SIGC_clip",
-    "llm_gemma4-latest_icons": "GC_small",
-    "llm_gemma4-31b_icons": "GC_big",
-    "kde_scene_llm_gemma4-latest_icons": "SGC_small",
-    "kde_scene_llm_gemma4-31b_icons": "SGC_big",
-    "kde_scene_llm_gemma4-31b_icons_ensemble_verify": "SGC_big_ensemble",
+    "kde_scene_kde_icon_clip_icons_rgb_fullres": "SIGC_clip",
+    "llm_gemma4-latest_icons_rgb_fullres": "GC_small",
+    "llm_gemma4-31b_icons_rgb_fullres": "GC_big",
+    "kde_scene_llm_gemma4-latest_icons_rgb_fullres": "SGC_small",
+    "kde_scene_llm_gemma4-31b_icons_rgb_fullres": "SGC_big",
+    "kde_scene_llm_gemma4-31b_icons_ensemble_verify_ignore_big_rgb_fullres": "SGC_big_ensemble",
 }
 
 # --- Matching ------------------------------------------------------------------

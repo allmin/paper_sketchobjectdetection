@@ -42,11 +42,11 @@ DATA_ROOT = "01_synthetic_data"
 DETECTIONS_ROOT = "02_detected_picture_elements"
 OUT_DIR = "03_evaluation/threshold_calibration"
 
-PIPELINES = {                                  # folder -> name in the paper
-    "llm_gemma4-31b_icons": "GC_big",
-    "llm_gemma4-latest_icons": "GC_small",
-    "kde_scene_llm_gemma4-31b_icons": "SGC_big",
-    "kde_scene_llm_gemma4-latest_icons": "SGC_small",
+PIPELINES = {                                  # folder in 02_detected_picture_elements -> name in the paper
+    "llm_gemma4-31b_icons_rgb_fullres": "GC_big",
+    "llm_gemma4-latest_icons_rgb_fullres": "GC_small",
+    "kde_scene_llm_gemma4-31b_icons_rgb_fullres": "SGC_big",
+    "kde_scene_llm_gemma4-latest_icons_rgb_fullres": "SGC_small",
 }
 MIN_IOU = 0.3                                  # same as the matching in s03
 TEST_FRACTION = 0.3                            # share of images held out
