@@ -37,7 +37,7 @@ from classes.evaluation_plots import threshold_sensitivity_report
 # Every data folder (synthetic batch or real-data folder) is evaluated separately:
 # results go to <results root>/<pipeline>/<folder>/ and the folder name ends each
 # row name in super_summary.xlsx.
-USE_REAL_DATA = True
+USE_REAL_DATA = False
 SYNTHETIC_DATA_ROOT = "01_synthetic_data"
 REAL_DATA_ROOT = "01_real_data"
 DETECTIONS_ROOT = "02_detected_picture_elements"
@@ -46,7 +46,7 @@ EVALUATION_ROOT = "03_evaluation_real" if USE_REAL_DATA else "03_evaluation"
 
 # --- Pipelines and settings to evaluate --------------------------------------
 # Default run on synthetic data: every pipeline x metric x threshold below.
-PIPELINES = ["llm_gemma4-31b_icons_rgb_fullres", "kde_scene_llm_gemma4-31b_icons_rgb_fullres"]
+PIPELINES = ["llm_gemma4-latest_icons_rgb_fullres", "kde_scene_llm_gemma4-latest_icons_rgb_fullres","llm_gemma4-31b_icons_rgb_fullres", "kde_scene_llm_gemma4-31b_icons_rgb_fullres","kde_scene_llm_gemma4-31b_icons_ensemble_verify_ignore_big_rgb_fullres","kde_scene_llm_gemma4-31b_icons_ensemble_verify_ignore_big_majority_rgb_fullres","kde_scene_kde_icon_clip_icons_rgb_fullres"]
 PROXIMITY_METRICS = ['iou-10', 'iou-20', 'iou-30', 'iou-40', 'iou-50', 'iou-60', 'iou-70', 'iou-80', 'iou-90',
                      'centerdist-100', 'centerdist-200', 'centerdist-400', 'centerdist-600', 'centerdist-800']
 SEMANTIC_THRESHOLDS = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
@@ -56,7 +56,7 @@ SEMANTIC_THRESHOLDS = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
 REF_PIPELINE = "kde_scene_llm_gemma4-31b_icons_ensemble_verify_ignore_big_rgb_fullres"
 
 # Quick run (synthetic data only): TEST_PIPELINES at the paper setting.
-TEST = True
+TEST = False
 TEST_PIPELINES = [f"kde_scene_llm_gemma4-31b_icons_ensemble_verify_{model}_only"
                   for model in ["ministral-3:8b", "llava:7b", "moondream:1.8b", "llama3.2-vision:latest", "minicpm-v:8b"]]
 
