@@ -9,6 +9,7 @@ Answers are saved after every click to annotations_<role>.csv in the folder.
 """
 
 import os
+import sys
 from datetime import datetime
 
 import pandas as pd
@@ -16,18 +17,10 @@ import streamlit as st
 
 DEFAULT_FOLDER = "03_evaluation/threshold_calibration"
 
-# Agree on this before annotating starts, and give both annotators the same text.
-GUIDELINE = """
-Decide whether the **detected label** names the same thing as the **ground-truth label**,
-so that a coder would accept it as the granular code for that icon.
-
-- **Similar:** synonyms and spelling variants (*sofa* / *couch*); the same object described in
-  more or less detail (*red ball* / *ball*); a part or a closely related type with a similar
-  appearance (*face* / *person*, *cow* / *bull*, *mobile phone*/*calculator*); a slightly general name (*animal* for *cat*).
-- **Not similar:** a different object (*cat* / *watch*); a label that is logically similar, but so broad it would not count as the
-  code (*round object* for *pizza*, ).
-- Judge only the two labels without any presumtions
-"""
+# The guideline lives in classes/threshold_calibration.py so the app and the Excel
+# coding sheet always show the same text.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # project folder
+from classes.threshold_calibration import GUIDELINE  # noqa: E402
 
 
 def load_pairs(folder, role):

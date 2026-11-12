@@ -33,6 +33,20 @@ from classes.evaluation import (CorruptJSONError, add_rescaled_boxes, data_folde
 SPLITS = ("train", "test")
 ROLES = ("primary", "second")  # primary annotates everything, second only the agreement subset
 
+# Annotation guideline, shown in the annotation app and in the Excel coding sheet.
+# Agree on it before annotating starts; every coder gets the same text.
+GUIDELINE = """
+Decide whether the **detected label** names the same thing as the **ground-truth label**,
+so that a coder would accept it as the granular code for that icon.
+
+- **Similar:** synonyms and spelling variants (*sofa* / *couch*); the same object described in
+  more or less detail (*red ball* / *ball*); a part or a closely related type with a similar
+  appearance (*face* / *person*, *cow* / *bull*, *mobile phone*/*calculator*); a slightly general name (*animal* for *cat*).
+- **Not similar:** a different object (*cat* / *watch*); a label that is logically similar, but so broad it would not count as the
+  code (*round object* for *pizza*, ).
+- Judge only the two labels without any presumtions
+"""
+
 
 def normalize_label(text):
     """Lowercase, trim and collapse spaces; used to recognise identical labels."""
@@ -203,6 +217,162 @@ def annotator_agreement(folder, label_pairs):
     ya, yb = [a[p] for p in ids], [b[p] for p in ids]
     return dict(n_pairs=len(ids), kappa=cohen_kappa_score(ya, yb),
                 raw_agreement=float(np.mean(np.array(ya) == np.array(yb))))
+
+
+# --- Excel coding sheets for additional coders --------------------------------
+
+SHEET_COLUMNS = ["pair_id", "Detected label", "Ground-truth label", "Answer"]
+ANSWERS = ("Similar", "Not similar")
+_ANSWER_VALUES = {"similar": True, "not similar": False}
+
+
+def write_coding_sheet(label_pairs, path):
+    """
+    Blank Excel coding sheet with every label pair (same random order as the app;
+    no scores, pipelines or train/test side). 'Answer' only accepts Similar /
+    Not similar from a drop-down. A second tab holds the guideline.
+    """
+    from openpyxl import Workbook
+    from openpyxl.styles import Alignment, Font, PatternFill
+    from openpyxl.worksheet.datavalidation import DataValidation
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Coding"
+    ws.append(SHEET_COLUMNS)
+    for r in label_pairs.itertuples():
+        ws.append([r.pair_id, r.pred_label, r.gt_label, None])
+    n = len(label_pairs) + 1
+    dv = DataValidation(type="list", formula1='"' + ",".join(ANSWERS) + '"', allow_blank=True,
+                        showErrorMessage=True, errorTitle="Invalid answer",
+                        error="Choose Similar or Not similar from the list.")
+    ws.add_data_validation(dv)
+    dv.add(f"D2:D{n}")
+    for cell in ws[1]:
+        cell.font = Font(bold=True)
+        cell.fill = PatternFill("solid", fgColor="DDEBF7")
+    for col, width in zip("ABCD", (10, 36, 36, 16)):
+        ws.column_dimensions[col].width = width
+    for row in ws.iter_rows(min_row=2, max_col=3):
+        for cell in row:
+            cell.alignment = Alignment(wrap_text=True, vertical="top")
+    ws.freeze_panes = "B2"
+
+    guide = wb.create_sheet("Guideline")
+    guide.column_dimensions["A"].width = 110
+    lines = ["How to fill in this sheet",
+             "In the 'Coding' tab, choose Similar or Not similar in the Answer column for every row. "
+             "Save the file under your name (e.g. Rosa.xlsx) and send it back. Don't change the other columns.",
+             ""] + [line.replace("**", "").replace("*", "") for line in GUIDELINE.strip().splitlines()]
+    for k, line in enumerate(lines, start=1):
+        guide.cell(row=k, column=1, value=line).alignment = Alignment(wrap_text=True, vertical="top")
+    guide["A1"].font = Font(bold=True, size=13)
+    wb.save(path)
+
+
+def read_coding_sheets(folder, label_pairs):
+    """
+    Read every filled-in coding sheet (*.xlsx) in `folder`; the coder's name is the
+    file name. Returns ({coder: {pair_id: bool}}, problems): a sheet whose pairs
+    don't match the current label_pairs.csv (e.g. made from an earlier sample) is
+    rejected; blank and invalid answers are left out and reported.
+    """
+    coders, problems = {}, []
+    if not os.path.isdir(folder):
+        return coders, problems
+    expected = label_pairs.set_index("pair_id")[["pred_label", "gt_label"]]
+    for name in sorted(f for f in os.listdir(folder) if f.lower().endswith(".xlsx") and not f.startswith("~$")):
+        coder = os.path.splitext(name)[0]
+        try:
+            df = pd.read_excel(os.path.join(folder, name), sheet_name="Coding", dtype=str)
+        except Exception as e:  # unreadable file or no "Coding" tab
+            problems.append(f"{name}: could not be read ({type(e).__name__}: {e})")
+            continue
+        if not set(SHEET_COLUMNS) <= set(df.columns):
+            problems.append(f"{name}: missing columns {sorted(set(SHEET_COLUMNS) - set(df.columns))}")
+            continue
+        df = df.dropna(subset=["pair_id"])
+        unknown = sorted(set(df.pair_id) - set(expected.index))
+        changed = [p for p, a, b in zip(df.pair_id, df["Detected label"], df["Ground-truth label"])
+                   if p in expected.index and (str(a), str(b)) != (str(expected.loc[p, "pred_label"]),
+                                                                   str(expected.loc[p, "gt_label"]))]
+        if unknown or changed:
+            problems.append(f"{name}: REJECTED - its pairs don't match the current sample "
+                            f"({len(unknown)} unknown pair ids, {len(changed)} with different labels). "
+                            f"It was probably made before the last 'sample'; send the coder a new sheet.")
+            continue
+        answers, blank, invalid = {}, 0, []
+        for pid, ans in zip(df.pair_id, df["Answer"]):
+            key = " ".join(str(ans).strip().lower().split()) if isinstance(ans, str) else ""
+            if not key:
+                blank += 1
+            elif key in _ANSWER_VALUES:
+                answers[pid] = _ANSWER_VALUES[key]
+            else:
+                invalid.append(f"{pid}={ans!r}")
+        if blank:
+            problems.append(f"{name}: {blank} pair(s) without an answer (left out)")
+        if invalid:
+            problems.append(f"{name}: {len(invalid)} invalid answer(s), left out: {', '.join(invalid[:5])}"
+                            + (" ..." if len(invalid) > 5 else ""))
+        coders[coder] = answers
+    return coders, problems
+
+
+def fleiss_kappa(ratings):
+    """Fleiss' kappa for binary ratings: rows = items, columns = raters (bool), every
+    item rated by every rater."""
+    ratings = np.asarray(ratings, dtype=int)
+    n_items, n_raters = ratings.shape
+    if n_items == 0 or n_raters < 2:
+        return np.nan
+    counts = np.stack([ratings.sum(axis=1), n_raters - ratings.sum(axis=1)], axis=1)  # similar / not similar
+    p_item = ((counts ** 2).sum(axis=1) - n_raters) / (n_raters * (n_raters - 1))
+    p_bar = p_item.mean()
+    p_cat = counts.sum(axis=0) / (n_items * n_raters)
+    p_e = (p_cat ** 2).sum()
+    return float((p_bar - p_e) / (1 - p_e)) if p_e < 1 else np.nan
+
+
+def coder_agreement(coders, reference="primary"):
+    """
+    Agreement between all coders ({coder: {pair_id: bool}}):
+      per_coder  each coder vs. the reference coder: pairs in common, Cohen's
+                 kappa, raw agreement, share answered 'similar'
+      pairwise   Cohen's kappa for every pair of coders
+      overall    Fleiss' kappa over the pairs answered by every coder
+    """
+    names = list(coders)
+
+    def compare(a, b):
+        ids = sorted(set(coders[a]) & set(coders[b]))
+        if len(ids) < 2:
+            return len(ids), np.nan, np.nan
+        ya, yb = [coders[a][p] for p in ids], [coders[b][p] for p in ids]
+        same = float(np.mean(np.array(ya) == np.array(yb)))
+        kappa = cohen_kappa_score(ya, yb) if len(set(ya) | set(yb)) > 1 else np.nan
+        return len(ids), kappa, same
+
+    per_coder = []
+    for c in names:
+        row = dict(coder=c, pairs_answered=len(coders[c]),
+                   share_similar=float(np.mean(list(coders[c].values()))) if coders[c] else np.nan)
+        if reference in coders and c != reference:
+            n, k, same = compare(reference, c)
+            row.update({f"pairs_in_common_with_{reference}": n, f"kappa_vs_{reference}": k,
+                        f"raw_agreement_vs_{reference}": same})
+        per_coder.append(row)
+
+    pairwise = []
+    for i, a in enumerate(names):
+        for b in names[i + 1:]:
+            n, k, same = compare(a, b)
+            pairwise.append(dict(coder_a=a, coder_b=b, pairs_in_common=n, cohen_kappa=k, raw_agreement=same))
+
+    common = sorted(set.intersection(*(set(coders[c]) for c in names))) if len(names) >= 2 else []
+    overall = dict(coders=len(names), pairs_answered_by_all=len(common),
+                   fleiss_kappa=fleiss_kappa([[coders[c][p] for c in names] for p in common]) if common else np.nan)
+    return pd.DataFrame(per_coder), pd.DataFrame(pairwise), overall
 
 
 # ---------------------------------------------------------------------------

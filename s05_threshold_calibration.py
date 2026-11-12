@@ -20,6 +20,19 @@ Run the steps in order, from the project folder:
        Applies the locked threshold to the held-out TEST images, once. Refuses to
        run without a lock and warns if the test set was evaluated before.
 
+Extra coders, in Excel (any time after step 1):
+  python s05_threshold_calibration.py sheet
+       Writes coding_sheet.xlsx: all label pairs with an Answer column that only
+       accepts Similar / Not similar, plus the guideline. Each coder fills in a copy;
+       save it as <OUT_DIR>/coders/<coder name>.xlsx.
+  python s05_threshold_calibration.py agreement
+       Cohen's kappa of every coder against the primary annotations, between every
+       pair of coders, and Fleiss' kappa over all of them -> agreement_report.xlsx.
+       Can be run whenever a sheet comes in; it doesn't touch the train/test analysis.
+       The same tables are added to the train and test reports. The primary
+       annotations (app) stay the reference standard; extra coders only measure
+       how reliable it is.
+
 Everything is written to OUT_DIR. Decide the SETTINGS before step 1 and don't
 change them afterwards: they are recorded in settings.json, and step 3 / 4 refuse
 to run if they were changed.
@@ -74,6 +87,9 @@ MODEL_NAMES = {"sentence_transformer": "Sentence-Transformer", "clip": "CLIP"}
 
 def path(name):
     return os.path.join(OUT_DIR, name)
+
+
+CODERS_DIR = os.path.join(OUT_DIR, "coders")  # filled-in Excel coding sheets, one per coder
 
 
 # ===========================================================================
@@ -183,6 +199,7 @@ def cmd_train():
     occ, y, scores, label_pairs = annotated_side("train")
     res = tc.train_analysis(occ, y, scores, BETA, CV_FOLDS, CV_REPEATS, BOOTSTRAP_SAMPLES, FINAL_THRESHOLD, SEED)
     agreement = tc.annotator_agreement(OUT_DIR, label_pairs)
+    per_coder, pairwise, overall, problems = agreement_tables(label_pairs, verbose=False)
 
     with pd.ExcelWriter(path("train_report.xlsx"), engine="openpyxl") as w:
         pd.DataFrame([dict(n_pairs=len(y), n_similar=int(y.sum()), n_images=occ.image_group.nunique(),
@@ -195,6 +212,7 @@ def cmd_train():
         pd.DataFrame({m: pd.Series(v) for m, v in res["fold_thresholds"].items()}).to_excel(
             w, sheet_name="fold thresholds", index=False)
         pd.DataFrame([agreement]).to_excel(w, sheet_name="annotator agreement", index=False)
+        write_agreement_sheets(w, per_coder, pairwise, overall, problems)
     plot_train(res, path("train_figure.png"))
 
     if os.path.exists(path("threshold_lock.json")):
@@ -214,7 +232,10 @@ def cmd_train():
              "cv_precision", "cv_recall", "final_threshold"]].round(3).to_string())
     if res["diff"]:
         print("Paired difference:", {k: (round(float(v), 3) if not isinstance(v, str) else v) for k, v in res["diff"].items()})
-    print(f"Annotator agreement: {agreement}")
+    print(f"Annotator agreement (app roles, agreement subset): {agreement}")
+    if overall["coders"] > 2:
+        print(f"Fleiss' kappa over all {overall['coders']} coders: {overall['fleiss_kappa']:.3f} "
+              f"(details: run 'agreement')")
     print(f"Chosen: {res['chosen_model']} at threshold {res['chosen_threshold']:.3f} -> locked in "
           f"{path('threshold_lock.json')}. Next: run 'test' once.")
 
@@ -266,6 +287,68 @@ def plot_train(res, out_path):
 # Step 4: test
 # ===========================================================================
 
+def all_coders(label_pairs, verbose=True):
+    """Every coder's answers: the app roles ('primary', 'second') and the Excel
+    sheets in CODERS_DIR. Returns ({coder: {pair_id: bool}}, problems)."""
+    coders = {}
+    for role in tc.ROLES:
+        answers = tc.load_annotations(OUT_DIR, role)
+        if answers:
+            coders[role] = answers
+    sheets, problems = tc.read_coding_sheets(CODERS_DIR, label_pairs)
+    for name, answers in sheets.items():
+        key = name if name not in coders else f"{name} (sheet)"
+        coders[key] = answers
+    if verbose:
+        for prob in problems:
+            print("NOTE:", prob)
+    return coders, problems
+
+
+def agreement_tables(label_pairs, verbose=True):
+    coders, problems = all_coders(label_pairs, verbose)
+    per_coder, pairwise, overall = tc.coder_agreement(coders, reference="primary")
+    return per_coder, pairwise, overall, problems
+
+
+def write_agreement_sheets(writer, per_coder, pairwise, overall, problems):
+    per_coder.to_excel(writer, sheet_name="coder agreement", index=False)
+    pairwise.to_excel(writer, sheet_name="coder pairwise kappa", index=False)
+    pd.DataFrame([overall]).to_excel(writer, sheet_name="coder overall", index=False)
+    if problems:
+        pd.DataFrame({"problem": problems}).to_excel(writer, sheet_name="coder sheet problems", index=False)
+
+
+def cmd_sheet():
+    if not os.path.exists(path("label_pairs.csv")):
+        sys.exit("No label_pairs.csv: run 'sample' first.")
+    label_pairs = pd.read_csv(path("label_pairs.csv"))
+    os.makedirs(CODERS_DIR, exist_ok=True)
+    tc.write_coding_sheet(label_pairs, path("coding_sheet.xlsx"))
+    print(f"Wrote {path('coding_sheet.xlsx')} with {len(label_pairs)} label pairs. Give each coder a copy; "
+          f"save the filled-in files as {CODERS_DIR}/<coder name>.xlsx, then run 'agreement'.")
+
+
+def cmd_agreement():
+    if not os.path.exists(path("label_pairs.csv")):
+        sys.exit("No label_pairs.csv: run 'sample' first.")
+    label_pairs = pd.read_csv(path("label_pairs.csv"))
+    per_coder, pairwise, overall, problems = agreement_tables(label_pairs)
+    if per_coder.empty:
+        sys.exit(f"No annotations yet: annotate in the app (role 'primary') and/or put sheets in {CODERS_DIR}/")
+    with pd.ExcelWriter(path("agreement_report.xlsx"), engine="openpyxl") as w:
+        write_agreement_sheets(w, per_coder, pairwise, overall, problems)
+    pd.set_option("display.width", 160)
+    print(f"\nCoders ({len(label_pairs)} label pairs in the sample):")
+    print(per_coder.round(3).to_string(index=False))
+    if not pairwise.empty:
+        print("\nCohen's kappa for every pair of coders:")
+        print(pairwise.round(3).to_string(index=False))
+    print(f"\nFleiss' kappa over all {overall['coders']} coders: {overall['fleiss_kappa']:.3f} "
+          f"(on the {overall['pairs_answered_by_all']} pairs every coder answered)")
+    print(f"Saved to {path('agreement_report.xlsx')}")
+
+
 def cmd_test():
     check_settings()
     if not os.path.exists(path("threshold_lock.json")):
@@ -298,6 +381,7 @@ def cmd_test():
         per_pipeline.to_excel(w, sheet_name="per pipeline", index=False)
         if unseen_res is not None:
             unseen_res.to_excel(w, sheet_name="label pairs unseen in train", index=False)
+        write_agreement_sheets(w, *agreement_tables(pd.read_csv(path("label_pairs.csv")), verbose=False))
         pd.DataFrame([dict(test_pairs=len(y), test_similar=int(y.sum()), test_images=occ.image_group.nunique(),
                            share_label_pairs_also_in_train=float(1 - unseen.mean()), evaluation_number=n_runs,
                            lock=json.dumps(lock))]).to_excel(w, sheet_name="setup", index=False)
@@ -332,10 +416,11 @@ def cmd_test():
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("step", choices=["sample", "train", "test"])
+    ap.add_argument("step", choices=["sample", "train", "test", "sheet", "agreement"])
     ap.add_argument("--force", action="store_true", help="sample: replace an existing sample")
     a = ap.parse_args()
-    {"sample": lambda: cmd_sample(a.force), "train": cmd_train, "test": cmd_test}[a.step]()
+    {"sample": lambda: cmd_sample(a.force), "train": cmd_train, "test": cmd_test,
+     "sheet": cmd_sheet, "agreement": cmd_agreement}[a.step]()
 
 
 if __name__ == "__main__":
