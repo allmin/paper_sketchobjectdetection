@@ -23,10 +23,10 @@ so that a coder would accept it as the granular code for that icon.
 
 - **Similar:** synonyms and spelling variants (*sofa* / *couch*); the same object described in
   more or less detail (*red ball* / *ball*); a part or a closely related type with a similar
-  appearance (*face* / *person*, *kitten* / *cat*).
-- **Not similar:** a different object (*cat* / *dog*); a label so broad it would not count as the
-  code (*thing*, *object*, *animal* for *cat*); a description of something else in the picture.
-- Judge only the two labels. Don't try to guess which model produced them.
+  appearance (*face* / *person*, *cow* / *bull*, *mobile phone*/*calculator*); a slightly general name (*animal* for *cat*).
+- **Not similar:** a different object (*cat* / *watch*); a label that is logically similar, but so broad it would not count as the
+  code (*round object* for *pizza*, ).
+- Judge only the two labels without any presumtions
 """
 
 
