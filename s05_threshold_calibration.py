@@ -1,31 +1,31 @@
 """
-s05: choose the semantic-similarity threshold on annotated pairs, and test it on
+s03: choose the semantic-similarity threshold on annotated pairs, and test it on
 held-out images.
 
 Run the steps in order, from the project folder:
 
-  1. python s05_threshold_calibration.py sample
+  1. python s03_threshold_calibration.py sample
        Collects every prediction-ground-truth pair with IoU >= MIN_IOU from the
        pipelines below (only images all of them processed), splits the IMAGES into
        train / test, samples the same number of pairs per pipeline on each side and
        writes the label pairs to annotate.
-  2. Annotate in the app:  streamlit run s04_app.py  ->  "Calibration annotation"
+  2. Annotate in the app:  streamlit run s03b_annotation_app.py  ->  "Calibration annotation"
        role "primary" annotates all pairs; role "second" (another person) only the
        agreement subset, for Cohen's kappa. No scores or pipeline names are shown.
-  3. python s05_threshold_calibration.py train
+  3. python s03_threshold_calibration.py train
        Compares Sentence-Transformer and CLIP on the TRAIN images with repeated
        cross-validation (folds split by image), chooses the model and threshold by
        the rule below and writes them to threshold_lock.json.
-  4. python s05_threshold_calibration.py test
+  4. python s03_threshold_calibration.py test
        Applies the locked threshold to the held-out TEST images, once. Refuses to
        run without a lock and warns if the test set was evaluated before.
 
 Extra coders, in Excel (any time after step 1):
-  python s05_threshold_calibration.py sheet
+  python s03_threshold_calibration.py sheet
        Writes coding_sheet.xlsx: all label pairs with an Answer column that only
        accepts Similar / Not similar, plus the guideline. Each coder fills in a copy;
        save it as <OUT_DIR>/coders/<coder name>.xlsx.
-  python s05_threshold_calibration.py agreement
+  python s03_threshold_calibration.py agreement
        Cohen's kappa of every coder against the primary annotations, between every
        pair of coders, and Fleiss' kappa over all of them -> agreement_report.xlsx.
        Can be run whenever a sheet comes in; it doesn't touch the train/test analysis.
@@ -62,7 +62,7 @@ PIPELINES = {                                  # folder in 02_detected_picture_e
     "kde_scene_llm_gemma4-31b_icons_rgb_fullres": "SGC_big",
     "kde_scene_llm_gemma4-latest_icons_rgb_fullres": "SGC_small",
 }
-MIN_IOU = 0.3                                  # same as the matching in s03
+MIN_IOU = 0.3                                  # same as the matching in s04
 TEST_FRACTION = 0.3                            # share of images held out
 PAIRS_PER_PIPELINE = {"train": 100, "test": 50}
 AGREEMENT_PAIRS = 100                          # train pairs for the second annotator
@@ -121,7 +121,7 @@ def diagnose(info):
         print(f"- On the {sum(info['data_folders'].values())} images all pipelines processed, "
               f"{info['overlapping_pairs']} prediction/ground-truth pairs overlap at all; the highest IoU is "
               f"{info['max_iou']:.3f}. If that is far below {MIN_IOU}, the boxes are probably in different frames "
-              f"(check the predictions' image_size / box format against s03).")
+              f"(check the predictions' image_size / box format against s04).")
 
 
 def cmd_sample(force=False):
@@ -220,9 +220,15 @@ def cmd_train():
         if previous["test_runs"] or previous.get("earlier_locks"):
             print("WARNING: the test set has already been evaluated with an earlier lock; a new lock after seeing "
                   "the test results no longer gives an untouched test. This is recorded in threshold_lock.json.")
+    fold = res["fold_thresholds"][res["chosen_model"]]
+    fold = fold[~np.isnan(fold)]
     tc.write_lock(path("threshold_lock.json"), dict(
         model=res["chosen_model"], threshold=res["chosen_threshold"], beta=BETA,
+        similarity_model=(tc.SENTENCE_TRANSFORMER_MODEL if res["chosen_model"] == "sentence_transformer"
+                          else "CLIP ViT-B-32 (openai)"),
         thresholds_all_models=dict(zip(res["table"].model, res["table"].final_threshold)),
+        # spread of the thresholds chosen in the CV folds (s04 centres its sensitivity run on these)
+        fold_threshold_percentiles={str(q): float(np.percentile(fold, q)) for q in (5, 25, 50, 75, 95)},
         rule="highest cross-validated F-beta (ties: PR-AUC); final threshold = " + FINAL_THRESHOLD,
     ))
 

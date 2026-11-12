@@ -2,7 +2,7 @@
 s01b_prepare_real_data.py
 
 Prepares the real (non-synthetic) rich pictures so they can be run through
-s02_detect_picture_elements.py and evaluated with s03_evaluatedetections.py.
+s02_detect_picture_elements.py and evaluated with s04_evaluate_detections.py.
 
 For every sub-folder of 01_real_data/ (detected automatically):
   1. Renders the FIRST page of every PDF to a PNG named after the file-name
@@ -13,7 +13,7 @@ For every sub-folder of 01_real_data/ (detected automatically):
          01_real_data/<folder>/1001_gt.json
          [{"represents": "Mountain", "image_path": "./01_real_data/<folder>/1001.png",
            "bounding_box": [x1, y1, x2, y2], "element_type": "Icon"}, ...]
-     (The "_gt.json" suffix is what s03_evaluatedetections.py expects: it finds
+     (The "_gt.json" suffix is what s04_evaluate_detections.py expects: it finds
      the image by replacing "_gt.json" with ".png".)
   3. Logs every PDF without ground-truth rows and every ground-truth prefix
      without a PDF to 01_real_data/<folder>/prepare_real_data.log

@@ -1,5 +1,5 @@
 """
-Blind annotation of label pairs for threshold calibration (see s05_threshold_calibration.py).
+Blind annotation of label pairs for threshold calibration (see s03_threshold_calibration.py).
 
 Shows only the two labels: no similarity scores, no pipeline names, no train/test
 side, and the second annotator never sees the first one's answers.
@@ -64,7 +64,7 @@ def show():
     annotator = c3.text_input("Your name or initials")
 
     if not os.path.exists(os.path.join(folder, "label_pairs.csv")):
-        st.warning(f"No label_pairs.csv in {folder}. Run `python s05_threshold_calibration.py sample` first.")
+        st.warning(f"No label_pairs.csv in {folder}. Run `python s03_threshold_calibration.py sample` first.")
         return
     if not annotator.strip():
         st.info("Enter your name or initials to start.")

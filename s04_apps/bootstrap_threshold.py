@@ -40,8 +40,8 @@ Optionally (5) checks that the annotated pairs are representative of the
 similarity cache they were drawn from (Kolmogorov-Smirnov test on similarity).
 
 Run from the project root:
-    python s04_apps/bootstrap_threshold.py
-    python s04_apps/bootstrap_threshold.py --n-boot 5000 --beta 2 --reported-threshold 0.375
+    python apps/bootstrap_threshold.py
+    python apps/bootstrap_threshold.py --n-boot 5000 --beta 2 --reported-threshold 0.375
 Outputs go to 03_evaluation/threshold_bootstrap/ (summary.xlsx, bootstrap_threshold.png).
 """
 
@@ -58,7 +58,7 @@ DEFAULT_OUT = "03_evaluation/threshold_bootstrap"
 
 
 # ---------------------------------------------------------------------------
-# Core metrics (same definitions as s04_apps/prediction.py)
+# Core metrics (same definitions as apps/prediction.py)
 # ---------------------------------------------------------------------------
 
 def fbeta_optimum(y_true, scores, beta=2.0):
@@ -357,7 +357,7 @@ def main():
     ap.add_argument("--cache", default=DEFAULT_CACHE, help="similarity cache the pairs were sampled from ('' to skip)")
     ap.add_argument("--out-dir", default=DEFAULT_OUT)
     ap.add_argument("--score-col", default="similarity",
-                    help="similarity column; 'similarity' is the Sentence-Transformer score cached by s03")
+                    help="similarity column; 'similarity' is the Sentence-Transformer score cached by s04")
     ap.add_argument("--beta", type=float, default=2.0)
     ap.add_argument("--n-boot", type=int, default=2000)
     ap.add_argument("--stratified", action="store_true", help="keep the similar/dissimilar proportion fixed")

@@ -1,5 +1,5 @@
 """
-Figures and reports for the evaluation (used by s03 / classes.evaluation):
+Figures and reports for the evaluation (used by s04 / classes.evaluation):
   draw_annotated_image()          GT / TP / FP / FN boxes drawn on an image
   plot_iou_semantic_mapping()     IoU vs. semantic similarity per prediction / GT
   threshold_sensitivity_report()  precision / recall / ranks across thresholds

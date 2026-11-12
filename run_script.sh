@@ -13,4 +13,4 @@
 module load python/3.10.18 
 
 # Run your script
-python s03_evaluatedetections.py
+python s04_evaluate_detections.py

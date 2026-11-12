@@ -674,7 +674,7 @@ class MultiIconDataset:
         """
         Folder-name part describing the overlap setting. A single level keeps the
         original name (e.g. '00_to_00_percent_overlap_00_minimum_overlap_images'),
-        so existing s02/s03 outputs still line up. Several levels give e.g.
+        so existing s02/s04 outputs still line up. Several levels give e.g.
         'mixed_overlap_00-00_00-10_10-20_per_image_02_minimum_overlap_images'.
         """
         levels = Config.overlap_levels

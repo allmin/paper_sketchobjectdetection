@@ -1,5 +1,5 @@
 """
-Evaluation of detected picture elements against ground truth (used by s03).
+Evaluation of detected picture elements against ground truth (used by s04).
 
 Reading order:
   1. Geometry            iou(), center_distance()

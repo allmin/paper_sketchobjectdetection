@@ -1,5 +1,5 @@
 """
-Calibrating the semantic-similarity threshold on held-out data (used by s05).
+Calibrating the semantic-similarity threshold on held-out data (used by s03).
 
 Reading order:
   1. Collect     collect_pairs(): every prediction-ground-truth pair with enough
@@ -7,7 +7,7 @@ Reading order:
   2. Split       split_images(): images (not pairs) go to train or test
   3. Sample      sample_pairs(): the same number of pairs per pipeline and split;
                  label_pairs_to_annotate(): the unique label pairs, in random order
-  4. Annotate    (s04 "Calibration annotation" page) -> annotations_<role>.csv
+  4. Annotate    (s03b app, "Calibration annotation" page) -> annotations_<role>.csv
   5. Score       score_label_pairs(): Sentence-Transformer and CLIP similarity
   6. Train       train_analysis(): compare the models and choose the threshold with
                  repeated cross-validation in which folds are split by image
@@ -379,7 +379,10 @@ def coder_agreement(coders, reference="primary"):
 # 5. Similarity scores
 # ---------------------------------------------------------------------------
 
-def sentence_transformer_scores(text1, text2, model_name="sentence-transformers/all-MiniLM-L6-v2"):
+SENTENCE_TRANSFORMER_MODEL = "sentence-transformers/all-MiniLM-L6-v2"  # must match SEMANTIC_MODEL in s04
+
+
+def sentence_transformer_scores(text1, text2, model_name=SENTENCE_TRANSFORMER_MODEL):
     from sentence_transformers import SentenceTransformer
     model = SentenceTransformer(model_name)
     e1 = model.encode(list(text1), convert_to_tensor=True, normalize_embeddings=True)
@@ -427,7 +430,7 @@ def score_label_pairs(label_pairs, cache_path=None, scorers=None):
 # ---------------------------------------------------------------------------
 
 def fbeta_optimum(y, s, beta):
-    """F-beta optimal threshold on the precision-recall curve (as in s04)."""
+    """F-beta optimal threshold on the precision-recall curve (as in the Prediction app)."""
     y, s = np.asarray(y, int), np.asarray(s, float)
     if y.sum() == 0:
         return np.nan

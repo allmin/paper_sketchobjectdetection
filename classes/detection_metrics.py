@@ -1,7 +1,7 @@
 """
 Optional COCO-style detection metrics (mAP, mAR, ...) via torchmetrics.
 
-Only used when COMPUTE_DETECTION_METRICS is True in s03. Free-text labels are
+Only used when COMPUTE_DETECTION_METRICS is True in s04. Free-text labels are
 first mapped to ground-truth class ids by semantic similarity; the similarity is
 used as the detection score.
 """
